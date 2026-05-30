@@ -66,35 +66,6 @@ Découpage par champ, pas par fenêtre fixe : une recette produit un chunk `ingr
 
 `recipes.jsonl` conserve en plus un dictionnaire `meta` (`prep_time` / `cook_time` / `rest_time` / `difficulty` / `servings`), exclu du corps de récupération.
 
-## Vérification
-
-Pas de framework de tests. Régressions vérifiées par exécution sur un petit échantillon `--max-pages` + assertions `jq` :
-
-```bash
-.venv/bin/python p1_ingestion.py --max-pages 1
-jq -r '.slug' data/recipes.jsonl | sort > /tmp/cur.txt
-wc -l data/recipes.jsonl                                   # ≥112
-jq 'select(.steps|length==0)' data/recipes.jsonl           # doit être vide (records ingrédients-seuls rejetés)
-```
-
-Après modification du parseur, relancer le pipeline complet et diff'er l'ensemble des slugs dans `recipes.jsonl` ; chaque slug auparavant parsable doit toujours apparaître (le slug racine Risotto remplacé par trois sous-records `slug#N` est attendu).
-
-## Structure du dépôt
-
-```
-p1_ingestion.py            # tout le code P1 (crawl/parse/chunk + génération de rapports)
-requirements.txt
-data/
-  raw/                     # .gitignore : HTML téléchargés
-  recipes.jsonl            # versionné : recettes parsées
-  chunks.jsonl             # versionné : chunks produits
-  unparsed.md              # versionné : fichiers ignorés avec raisons
-docs/
-  p1_ingestion_report.md   # évolution du parseur et inventaire structurel
-  p1_parsing_report.md     # couverture courante et description de la stratégie
-CLAUDE.md                  # consignes projet pour Claude Code (contraintes + contexte)
-```
-
 ## Licence
 
 Voir [LICENSE](LICENSE).

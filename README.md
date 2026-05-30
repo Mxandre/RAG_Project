@@ -67,35 +67,6 @@ class Chunk:
 
 `recipes.jsonl` 额外保留 `meta` 字典（`prep_time`/`cook_time`/`rest_time`/`difficulty`/`servings`），不进检索正文。
 
-## 验证
-
-无测试框架。回归通过 `--max-pages` 小切片 + `jq` 断言：
-
-```bash
-.venv/bin/python p1_ingestion.py --max-pages 1
-jq -r '.slug' data/recipes.jsonl | sort > /tmp/cur.txt
-wc -l data/recipes.jsonl                                  # ≥112
-jq 'select(.steps|length==0)' data/recipes.jsonl          # 应为空（仅原料的记录被拒）
-```
-
-修改解析器后必须重跑全量并 diff `recipes.jsonl` 的 slug 集，每个原本可解析的 slug 都应保留（Risotto 主 slug 被三个 `slug#N` 子记录替换属正常）。
-
-## 仓库结构
-
-```
-p1_ingestion.py            # 全部 P1 代码（crawl/parse/chunk + 报告生成）
-requirements.txt
-data/
-  raw/                     # .gitignore：抓取 HTML
-  recipes.jsonl            # 入仓：解析后菜谱
-  chunks.jsonl             # 入仓：切块产物
-  unparsed.md              # 入仓：跳过文件清单 + 原因
-docs/
-  p1_ingestion_report.md   # 解析器演化与结构普查
-  p1_parsing_report.md     # 当前覆盖率与策略说明
-CLAUDE.md                  # Claude Code 项目指引（约束 + 上下文）
-```
-
 ## 许可证
 
 见 [LICENSE](LICENSE)。
