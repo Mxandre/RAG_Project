@@ -29,14 +29,23 @@ DATA_DIR = Path("data")
 RAW_DIR = DATA_DIR / "raw"
 RECIPES_JSONL = DATA_DIR / "recipes.jsonl"
 CHUNKS_JSONL = DATA_DIR / "chunks.jsonl"
+UNPARSED_MD = DATA_DIR / "unparsed.md"
+PARSING_REPORT_MD = Path("docs") / "p1_parsing_report.md"
 
 # 段落标记 (法语). 站点结构异构: 标记现于 h2/h3/strong/p/div.
 _RE_INGRED = re.compile(r"ingr[ée]dient", re.I)
-_RE_STEP = re.compile(r"pr[ée]paration|pr[ée]parer|\bétapes?\b|\betapes?\b|montage|r[ée]alisation|instruction", re.I)
+# 步骤标记: 关键词 + 序数式 "1ère étape" / "2ème étape" / "3e étape".
+_RE_STEP_ORD = r"\d+\s*(?:ère|ere|ème|eme|e)\s+étape"
+_RE_STEP = re.compile(rf"pr[ée]paration|pr[ée]parer|\bétapes?\b|\betapes?\b|montage|r[ée]alisation|instruction|{_RE_STEP_ORD}", re.I)
 # 锚定版 (行首): 用于内容元素长段落, 仅行首关键词才算标记, 防中部含词误判.
-_RE_ANCHOR = re.compile(r"^\W*(ingr[ée]dient|pr[ée]paration|pr[ée]parer|étapes?|etapes?|montage|r[ée]alisation|instruction)", re.I)
+_RE_ANCHOR = re.compile(rf"^\W*(?:ingr[ée]dient|pr[ée]paration|pr[ée]parer|étapes?|etapes?|montage|r[ée]alisation|instruction|{_RE_STEP_ORD})", re.I)
+# 多菜谱 h3 编号头, e.g. "1. Risotto aux champignons sauvages".
+_RE_SUBHEAD_NUM = re.compile(r"^\s*\d+\.\s+\w", re.I)
+# 隐式步骤段提示: 短冒号标题含 "recette/façon" 多为 "La recette de X :" 步骤起点.
+_RE_STEP_HINT = re.compile(r"\brecette\b|\bfa[cç]on\b", re.I)
 # 结尾/旁支标题 — 关闭当前段落, 防 conclusion/conseils 等正文泄漏入 sections.
-_RE_END = re.compile(r"conclusion|conseil|astuce|variante|le saviez|bon app|buon app|pour conclure|pourquoi", re.I)
+# 边界锚定: 防 "déconseillons"/"déconseillée" 等步骤正文里的派生词触发关段.
+_RE_END = re.compile(r"\b(?:conclusion|conseils?|astuces?|variantes?|le saviez|bon app|buon app|pour conclure|pourquoi)\b", re.I)
 # metadata 行 (非原料/步骤) — 抽成独立字段, 不进 sections. 也防 "Temps de préparation" 误判 step.
 _RE_PREP_TIME = re.compile(r"temps de pr[ée]paration\s*:?\s*(.+)", re.I)
 _RE_COOK_TIME = re.compile(r"temps de cuisson\s*:?\s*(.+)", re.I)
@@ -183,54 +192,51 @@ def _try_meta(text: str, meta: dict) -> bool:
     if _RE_META_LINE.search(text) or _RE_PURE_DUR.match(text):
         return True  # metadata 关键词无值 / 分离的纯时长值 — 跳过, 防进 section
     sv = _RE_SERVINGS.search(text)
-    if sv and len(text) < 45:  # 短 servings 行 (如 "Recette pour 4 à 6 personnes")
+    if sv and len(text) < 45 and not _RE_INGRED.search(text):
+        # 短 servings 行 (如 "Recette pour 4 à 6 personnes"). 排除 "Ingrédients pour N personnes :"
+        # 这种同时含 ingrédient 关键词的标记, 否则会吞掉原料段标记 (girolles / riz-rouge bug).
         meta.setdefault("servings", _clean(sv.group(0)))
         return True
     return False
 
 
-def parse_recipe(html: str, source_url: str) -> dict | None:
-    """抽 name / ingredients[] / steps[] / meta. 关键字段缺失返回 None.
+def _walk(descendants, *, default_ingredients: bool = True) -> tuple[list[str], list[str], dict, bool]:
+    """单遍扫给定 descendants 序列, 抽 ingredients/steps/meta. 末位 bool=是否命中显式关键词标记.
 
-    站点结构异构 (见结构普查): 段标记现于 h2/h3/h4/strong/b/p/div, 内容载体 li 与 p 混用.
-    策略: 文档顺序单遍; current 跟踪当前段落; h2=硬边界(非 ingred/step 即关段),
-    h3/h4/strong/p=软标记(仅命中正则才切换); metadata 行抽独立字段不进 sections.
+    显式标记 = section_of 命中 (ingrédient/préparation/étape/...) 或 _RE_STEP_HINT (recette/façon).
+    标记规则: 标题/strong/b 元素 — 命中关键词切段, h2 非命中=硬关段.
+    内容元素 (p/li/div 叶子) — 锚定行首关键词 或 冒号结尾标题 → 切段.
+    短冒号子标题 (`Le brownie :`) — current=None 时假设进入 ingredients (entremet 子组).
+    `<li>` / 散文 `<p>` 出现而 current=None → fallback 入 ingredients (cepe-bordeaux 无显式 header).
+    `current=ingredients` 下遇散文 `<p>` 无 dash 前缀 → 切到 steps (riz-rouge 无显式步骤标记).
     """
-    soup = BeautifulSoup(html, "html.parser")
-    name = _extract_name(soup)
-
-    box = soup.select_one("div.blog_description") or soup.select_one("div.post-details")
-    if box is None:
-        log.warning("无正文容器: %s", source_url)
-        return None
-
     ingredients: list[str] = []
     steps: list[str] = []
     meta: dict = {}
     current: str | None = None
+    explicit_seen = False
 
     def add(txt: str) -> None:
         if txt and current:
             (ingredients if current == "ingredients" else steps).append(txt)
 
-    for el in box.descendants:
+    for el in descendants:
         if not isinstance(el, Tag):
             continue
         tag = el.name
 
-        # 标记元素: 标题 h2/h3/h4 + 内联粗体 strong/b (本站常当段落标记).
         if tag in ("h2", "h3", "h4", "strong", "b"):
             head = _clean(el.get_text())
             sec = _section_of(head)
             if sec:
                 current = sec
+                explicit_seen = True
             elif _RE_END.search(head):
                 current = None
             elif tag == "h2":
-                current = None  # h2 硬边界: 非 ingred/step 标题 → 关闭段落
+                current = None
             continue
 
-        # 内容元素 (叶子 p/li/div). 跳过含块级子元素者, 防父子文本重复收集.
         if tag in ("p", "li", "div"):
             if el.find(["p", "li", "ul", "ol", "div", "table"]):
                 continue
@@ -239,28 +245,66 @@ def parse_recipe(html: str, source_url: str) -> dict | None:
                 continue
             if _try_meta(txt, meta):
                 continue
-            # 内联标记: 行首锚定 ("Étape 1 :"/"Ingrédients...") 或 冒号结尾短标题
-            # ("Voici les ingrédients :"). 防长正文/含词原料行误判为段落标记.
+
             sec = _section_of(txt)
-            is_marker = bool(_RE_ANCHOR.match(txt)) or (txt.rstrip().endswith(":") and len(txt) < 80)
+            colon_short = txt.rstrip().endswith(":") and len(txt) < 80
+            colon_with_kw = txt.rstrip().endswith(":") and sec is not None
+            is_marker = bool(_RE_ANCHOR.match(txt)) or colon_short or colon_with_kw
+
             if sec and is_marker:
                 current = sec
+                explicit_seen = True
                 rest = _clean(re.sub(r"^.*?:", "", txt, count=1)) if ":" in txt else ""
                 if rest:
                     add(rest)
-            elif _RE_END.search(txt):
-                current = None
-            else:
-                add(txt)
+                continue
 
-    # servings 兜底: 全文扫一次 (常在标题/intro), 不覆盖 loop 内已抽值.
+            # 短冒号子标题无关键词. 区分两路:
+            # — 含 "recette/façon" → 步骤段起点 (girolles "La recette de X :").
+            # — 否则: 原料子组标签 (entremet "Le brownie :"/"Mousse chocolat :").
+            if colon_short and sec is None and not _RE_END.search(txt):
+                if _RE_STEP_HINT.search(txt):
+                    current = "steps"
+                    explicit_seen = True
+                    continue
+                if default_ingredients and current is None:
+                    current = "ingredients"
+                if current == "ingredients":
+                    add(f"— {txt.rstrip(':').strip()}")
+                    continue
+
+            if _RE_END.search(txt):
+                current = None
+                continue
+
+            # `<p>` 散文转步骤: 原料段中遇到非 dash 长散文 → 隐式步骤起点 (riz-rouge).
+            if (tag == "p" and current == "ingredients"
+                    and not txt.lstrip().startswith(("-", "–", "•", "—"))
+                    and len(txt) > 50):
+                current = "steps"
+
+            # `<li>` fallback: 未声明段落 → 默认原料 (cepe-bordeaux).
+            if tag == "li" and current is None and default_ingredients:
+                current = "ingredients"
+
+            add(txt)
+
+    return ingredients, steps, meta, explicit_seen
+
+
+def _parse_standard(box: Tag, name: str, source_url: str) -> dict | None:
+    ingredients, steps, meta, explicit_seen = _walk(box.descendants)
+
     if "servings" not in meta:
         sv = _RE_SERVINGS.search(box.get_text(" "))
         if sv:
             meta["servings"] = _clean(sv.group(0))
 
-    if not name or (not ingredients and not steps):
-        log.warning("关键字段缺失, 跳过: %s", source_url)
+    if not name or not steps:
+        # 要求步骤段必须解析到 — 仅原料 (crepes div-only) 多为低质布局, 弃.
+        return None
+    if not explicit_seen:
+        # 无任何显式关键词标记 → 全靠 fallback 抓的 li/p, 多为列表式文章 (tapas/crepes).
         return None
 
     return {
@@ -273,23 +317,205 @@ def parse_recipe(html: str, source_url: str) -> dict | None:
     }
 
 
+def _multi_sub_headings(box: Tag) -> list[Tag]:
+    """编号 h3 子菜谱头列表 (`1. Risotto aux ...`).
+
+    排除步骤分节型 h3 (`1. Préparation :` / `2. Cuisson :`) — 它们是步骤章节而非独立菜谱.
+    """
+    out: list[Tag] = []
+    for h in box.find_all("h3"):
+        text = _clean(h.get_text())
+        if not _RE_SUBHEAD_NUM.match(text):
+            continue
+        if _section_of(text) is not None:
+            continue
+        # 冒号终结 ("1. Préparation :", "2. Cuisson :") 是步骤章节, 非子菜谱.
+        if text.rstrip().endswith(":"):
+            continue
+        out.append(h)
+    return out
+
+
+def _slice_after(start: Tag, stop: Tag | None):
+    """yield start 之后到 stop 之前的所有 descendants (深度优先)."""
+    seen = False
+    for el in start.parent.descendants if start.parent else []:
+        if el is start:
+            seen = True
+            continue
+        if not seen:
+            continue
+        if stop is not None and el is stop:
+            break
+        yield el
+
+
+def _parse_multi(box: Tag, source_url: str) -> list[dict]:
+    """多菜谱页 — 每个编号 h3 切一个子记录, 各自运行 _walk."""
+    heads = _multi_sub_headings(box)
+    base_slug = _slug_from_article_url(source_url)
+    out: list[dict] = []
+    for i, h in enumerate(heads, start=1):
+        stop = heads[i] if i < len(heads) else None
+        sub_name = _clean(re.sub(r"^\s*\d+\.\s*", "", h.get_text()))
+        ingredients, steps, meta, _ = _walk(_slice_after(h, stop))
+        if not ingredients and not steps:
+            continue
+        out.append({
+            "slug": f"{base_slug}#{i}",
+            "name": sub_name,
+            "source_url": source_url,
+            "meta": meta,
+            "ingredients": ingredients,
+            "steps": steps,
+        })
+    return out
+
+
+def _classify(box: Tag) -> str:
+    """multi=≥2 编号 h3; 否则 standard (parser 自判能否抽出, None 时上层归 skip)."""
+    if len(_multi_sub_headings(box)) >= 2:
+        return "multi"
+    return "standard"
+
+
+def parse_recipe(html: str, source_url: str) -> list[dict] | None:
+    """分类后路由: multi/standard/skip. None=skip 或解析失败."""
+    soup = BeautifulSoup(html, "html.parser")
+    name = _extract_name(soup)
+    box = soup.select_one("div.blog_description") or soup.select_one("div.post-details")
+    if box is None:
+        log.warning("无正文容器: %s", source_url)
+        return None
+
+    kind = _classify(box)
+    if kind == "multi":
+        recs = _parse_multi(box, source_url)
+        if recs:
+            return recs
+        log.warning("multi 分类但无子记录, 回退 standard: %s", source_url)
+
+    rec = _parse_standard(box, name, source_url)
+    if rec is None:
+        log.warning("关键字段缺失, 跳过: %s", source_url)
+        return None
+    return [rec]
+
+
 def _url_from_raw_path(path: Path) -> str:
     return f"{BASE}/blog/article/{path.stem}.html"
 
 
+def _skip_reason(html: str) -> str:
+    """诊断 None 返回原因 (报告用)."""
+    soup = BeautifulSoup(html, "html.parser")
+    box = soup.select_one("div.blog_description") or soup.select_one("div.post-details")
+    if box is None:
+        return "no container (`div.blog_description` / `div.post-details`)"
+    name = _extract_name(soup)
+    _, _, _, explicit_seen = _walk(box.descendants)
+    if not name:
+        return "no recipe title"
+    if not explicit_seen:
+        return "no explicit ingrédient/préparation/étape marker (listicle or div-only layout)"
+    return "no steps section recovered (ingredients-only / steps merged into prose)"
+
+
 def build_recipes_jsonl(raw_dir: Path = RAW_DIR, out: Path = RECIPES_JSONL) -> Path:
-    """解析 raw_dir 全部 HTML -> recipes.jsonl."""
+    """解析 raw_dir 全部 HTML → recipes.jsonl. 同时落 unparsed.md + parsing_report.md."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    n_ok = 0
+    n_total = 0
+    n_standard = 0
+    n_multi_records = 0
+    n_multi_pages = 0
+    unparsed: list[tuple[str, str]] = []  # (slug, reason)
+
     with out.open("w", encoding="utf-8") as f:
         for path in sorted(raw_dir.glob("*.html")):
-            rec = parse_recipe(path.read_text(encoding="utf-8"), _url_from_raw_path(path))
-            if rec is None:
+            n_total += 1
+            html = path.read_text(encoding="utf-8")
+            recs = parse_recipe(html, _url_from_raw_path(path))
+            if not recs:
+                unparsed.append((path.stem, _skip_reason(html)))
                 continue
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            n_ok += 1
-    log.info("parse 完成: %d recipes -> %s", n_ok, out)
+            for rec in recs:
+                # 步骤融合: 碎片化 li 列表 → 单段散文, 利于向量召回.
+                if rec.get("steps"):
+                    rec["steps"] = [" ".join(rec["steps"])]
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if len(recs) > 1:
+                n_multi_pages += 1
+                n_multi_records += len(recs)
+            else:
+                n_standard += 1
+    log.info("parse 完成: %d standard + %d multi-records (from %d pages); %d skipped",
+             n_standard, n_multi_records, n_multi_pages, len(unparsed))
+    _emit_unparsed_md(unparsed)
+    _emit_parsing_report(n_total, n_standard, n_multi_pages, n_multi_records, unparsed)
     return out
+
+
+def _emit_unparsed_md(unparsed: list[tuple[str, str]]) -> None:
+    UNPARSED_MD.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Unparsed recipes\n",
+             "Pages skipped by `parse_recipe` (heterogeneous layouts not yet supported).\n",
+             "| File | Reason |", "|---|---|"]
+    for slug, reason in sorted(unparsed):
+        lines.append(f"| `{slug}.html` | {reason} |")
+    UNPARSED_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _emit_parsing_report(n_total: int, n_standard: int, n_multi_pages: int,
+                         n_multi_records: int, unparsed: list[tuple[str, str]]) -> None:
+    PARSING_REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
+    n_parsed_pages = n_total - len(unparsed)
+    lines = [
+        "# P1 Parsing Report",
+        "",
+        "## Strategy",
+        "",
+        "Dispatcher in `parse_recipe()` classifies each HTML then routes to a strategy parser. A page is",
+        "rejected (logged to `data/unparsed.md`) when it has no recipe container, no explicit",
+        "ingrédient/préparation/étape marker (listicle / div-only layouts), or no steps section recovered.",
+        "",
+        "**multi** — page contains ≥2 numbered `<h3>` sub-recipe headings whose text is not colon-",
+        "terminated and not a known step keyword (e.g. *Les délices du Risotto*: `1. Risotto aux",
+        "champignons sauvages`). Each sub-recipe is sliced and parsed independently with `slug#N` ids.",
+        "",
+        "**standard** — single-recipe pages. Single document-order pass via `_walk()` collects",
+        "ingredients/steps using section markers. Rules:",
+        "",
+        "- `_RE_INGRED` / `_RE_STEP` regex match on h2/h3/h4/strong/b headers + colon-anchored `<p>` lines.",
+        "- Step markers extended to numbered ordinals: `1ère étape` / `2ème étape` / `3e étape`.",
+        "- Servings regex no longer steals ingredient markers like `Ingrédients pour 4 personnes :`.",
+        "- Short colon-terminated sub-titles (e.g. `Le brownie :`) act as ingredient sub-group labels;",
+        "  ones containing `recette`/`façon` switch to the steps section instead (e.g. *girolles*",
+        "  `La recette des girolles persillées :`).",
+        "- `_RE_END` is word-boundary anchored so derivatives like `déconseillons` no longer close the",
+        "  current section.",
+        "- `<li>` with no preceding section marker defaults to `ingredients` (`cepe-bordeaux`).",
+        "- Inside `ingredients`, a non-dash `<p>` longer than 50 chars implicitly opens steps",
+        "  (`riz-rouge-de-camargue`).",
+        "",
+        "Step lists are fused into a single space-joined paragraph before persistence — better vector",
+        "recall for fragmented procedural pages (e.g. *entremet* with 30+ tiny `<li>` steps).",
+        "",
+        "## Coverage",
+        "",
+        f"- Total HTML files: **{n_total}**",
+        f"- Parsed pages: **{n_parsed_pages}** ({n_parsed_pages * 100 // n_total}%)",
+        f"  - standard: {n_standard}",
+        f"  - multi-recipe pages: {n_multi_pages} → {n_multi_records} sub-records",
+        f"- Skipped: **{len(unparsed)}** (see `data/unparsed.md`)",
+        "",
+        "## Skipped files",
+        "",
+        "| File | Reason |",
+        "|---|---|",
+    ]
+    for slug, reason in sorted(unparsed):
+        lines.append(f"| `{slug}.html` | {reason} |")
+    PARSING_REPORT_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def load_recipes(path: Path = RECIPES_JSONL) -> list[dict]:
