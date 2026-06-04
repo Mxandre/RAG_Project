@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: rag
+Version: 0.1.0
+Summary: A small RAG data processing project.
+Requires-Python: >=3.10
+License-File: LICENSE
+Requires-Dist: langchain-core
+Requires-Dist: langchain-text-splitters
+Requires-Dist: langchain-chroma
+Requires-Dist: langchain-openai
+Requires-Dist: python-dotenv
+Dynamic: license-file
