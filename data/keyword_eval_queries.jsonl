@@ -1,0 +1,8 @@
+{"query": "risotto champignons parmesan", "expected_recipe": "Risotto aux champignons sauvages"}
+{"query": "foie gras figues brioche", "expected_recipe": "Recette de Fêtes : Découvrez Deux Recettes Uniques à Base de Foie Gras de Canard"}
+{"query": "recette avec citron et asperges", "expected_recipe": "Risotto aux asperges et au citron"}
+{"query": "gaufres haricots burrata truite", "expected_recipe": "Recette gaufre facile : gaufres haricots, burrata, truite fumée"}
+{"query": "menu noel foie gras pintade marrons", "expected_recipe": "Menu de Noël traditionnel : foie gras poêlé, pintade aux marrons et bûche maison"}
+{"query": "confiture abricots citron sucre", "expected_recipe": "Confiture d'abricots recette"}
+{"query": "truite fario poele citron", "expected_recipe": "Truite fario à la poêle : cuisson et recette on vous dit tout !"}
+{"query": "brochettes crevettes maquereaux tomates courgette", "expected_recipe": "Brochettes de crevettes et filets de maquereaux grillés recette estivale !"}

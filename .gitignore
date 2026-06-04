@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 .venv/
+.hf_cache/
+.env
+.idea/
+chroma_db/
+rag.egg-info/
+data/keyword_index.json
 data/raw/
 .claude/
 CLAUDE.md

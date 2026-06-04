@@ -1,0 +1,486 @@
+"""Hybrid retrieval: keyword index + embedding vector search.
+
+This script combines:
+
+- keyword retrieval from ``p2_keyword_retrieval.py``
+- vector retrieval from Chroma built by ``data_process.py``
+
+Fusion uses Reciprocal Rank Fusion (RRF), which is robust because BM25 scores
+and vector distances are not on the same scale.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+from data_process import build_chroma_vectorstore
+from p2_keyword_retrieval import CHUNKS_JSONL, keyword_search
+
+
+DEFAULT_MODEL = "BAAI/bge-m3"
+DEFAULT_COLLECTION = "recipes"
+DEFAULT_CHROMA_DIR = Path("chroma_db")
+DEFAULT_EVAL = Path("data") / "keyword_eval_queries.jsonl"
+DEFAULT_HF_CACHE_DIR = Path(".hf_cache")
+
+
+def repair_mojibake(text: str) -> str:
+    """Repair common UTF-8-as-Latin-1 mojibake such as 'Ã©' -> 'é'."""
+    if not isinstance(text, str) or "Ã" not in text:
+        return text
+    try:
+        return text.encode("latin1").decode("utf-8")
+    except UnicodeError:
+        return text
+
+
+def repair_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {key: repair_mojibake(value) if isinstance(value, str) else value for key, value in metadata.items()}
+
+
+def make_embeddings(model_name: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_HF_CACHE_DIR):
+    """Create the HuggingFace embedding function lazily."""
+    from langchain_huggingface import HuggingFaceEmbeddings
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(cache_dir.resolve()))
+    os.environ.setdefault("TRANSFORMERS_CACHE", str((cache_dir / "transformers").resolve()))
+    return HuggingFaceEmbeddings(
+        model=model_name,
+        cache_folder=str(cache_dir),
+        model_kwargs={"local_files_only": True},
+    )
+
+
+def load_vectorstore(
+    *,
+    persist_directory: Path = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION,
+    model_name: str = DEFAULT_MODEL,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+):
+    from langchain_chroma import Chroma
+
+    return Chroma(
+        persist_directory=str(persist_directory),
+        embedding_function=make_embeddings(model_name, cache_dir),
+        collection_name=collection_name,
+    )
+
+
+def rebuild_vectorstore(
+    *,
+    jsonl_path: Path = CHUNKS_JSONL,
+    persist_directory: Path = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION,
+    model_name: str = DEFAULT_MODEL,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+    reset: bool = False,
+):
+    if reset and persist_directory.exists():
+        shutil.rmtree(persist_directory)
+
+    return build_chroma_vectorstore(
+        jsonl_path=jsonl_path,
+        embeddings=make_embeddings(model_name, cache_dir),
+        persist_directory=persist_directory,
+        collection_name=collection_name,
+    )
+
+
+def vector_search(
+    query: str,
+    *,
+    top_k: int = 5,
+    persist_directory: Path = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION,
+    model_name: str = DEFAULT_MODEL,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+) -> dict[str, Any]:
+    vectorstore = load_vectorstore(
+        persist_directory=persist_directory,
+        collection_name=collection_name,
+        model_name=model_name,
+        cache_dir=cache_dir,
+    )
+    hits = vectorstore.similarity_search_with_score(query, k=top_k)
+
+    results = []
+    for rank, (doc, distance) in enumerate(hits, start=1):
+        metadata = dict(doc.metadata)
+        metadata = repair_metadata(metadata)
+        source_id = metadata.get("id") or metadata.get("chunk_id") or f"vector::{rank}"
+        text = repair_mojibake(doc.page_content)
+        results.append(
+            {
+                "id": source_id,
+                "score": 1.0 / (1.0 + float(distance)),
+                "raw_distance": float(distance),
+                "rank": rank,
+                "text": text,
+                "metadata": metadata,
+                "matched_terms": [],
+                "snippet": _snippet(text),
+                "retriever": "vector",
+            }
+        )
+
+    return {"query": query, "results": results}
+
+
+def hybrid_search(
+    query: str,
+    *,
+    top_k: int = 5,
+    keyword_k: int = 20,
+    vector_k: int = 20,
+    rrf_k: int = 60,
+    keyword_weight: float = 1.0,
+    vector_weight: float = 1.0,
+    persist_directory: Path = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION,
+    model_name: str = DEFAULT_MODEL,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+) -> dict[str, Any]:
+    keyword_payload = keyword_search(query, top_k=keyword_k)
+    vector_payload = vector_search(
+        query,
+        top_k=vector_k,
+        persist_directory=persist_directory,
+        collection_name=collection_name,
+        model_name=model_name,
+        cache_dir=cache_dir,
+    )
+
+    fused: dict[str, dict[str, Any]] = {}
+    scores: defaultdict[str, float] = defaultdict(float)
+
+    def add_results(results: list[dict[str, Any]], source: str, weight: float) -> None:
+        for rank, result in enumerate(results, start=1):
+            result = {
+                **result,
+                "text": repair_mojibake(result.get("text", "")),
+                "snippet": repair_mojibake(result.get("snippet", "")),
+                "metadata": repair_metadata(result.get("metadata", {})),
+            }
+            result_id = result["id"]
+            scores[result_id] += weight / (rrf_k + rank)
+            if result_id not in fused:
+                fused[result_id] = {
+                    **result,
+                    "retriever": "hybrid",
+                    "keyword_score": 0.0,
+                    "vector_score": 0.0,
+                    "keyword_rank": None,
+                    "vector_rank": None,
+                    "sources": [],
+                }
+            fused[result_id]["sources"].append(source)
+            fused[result_id][f"{source}_rank"] = rank
+            fused[result_id][f"{source}_score"] = result.get("score", 0.0)
+
+            # Keyword results are loaded from the current JSONL and preserve
+            # cleaner text/metadata. Vector hits still contribute rank and can
+            # fill vector-only results, but should not overwrite keyword text.
+            if source == "vector" and "keyword" not in fused[result_id]["sources"]:
+                fused[result_id]["text"] = result["text"]
+                fused[result_id]["snippet"] = result["snippet"]
+                fused[result_id]["metadata"] = {**fused[result_id].get("metadata", {}), **result["metadata"]}
+
+    add_results(keyword_payload["results"], "keyword", keyword_weight)
+    add_results(vector_payload["results"], "vector", vector_weight)
+
+    results = []
+    for result_id, result in fused.items():
+        result["score"] = scores[result_id]
+        result["sources"] = sorted(set(result["sources"]))
+        results.append(result)
+
+    results.sort(key=lambda item: item["score"], reverse=True)
+    return {
+        "query": query,
+        "analysis": keyword_payload.get("analysis", {}),
+        "results": results[:top_k],
+        "keyword_results": keyword_payload["results"],
+        "vector_results": vector_payload["results"],
+    }
+
+
+def evaluate(
+    eval_path: Path = DEFAULT_EVAL,
+    *,
+    mode: str = "hybrid",
+    top_k_values: tuple[int, ...] = (1, 3, 5, 10),
+    persist_directory: Path = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION,
+    model_name: str = DEFAULT_MODEL,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+) -> dict[str, Any]:
+    rows = [json.loads(line) for line in eval_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    max_k = max(top_k_values)
+    metric_sums = {
+        **{f"recall@{k}": 0.0 for k in top_k_values},
+        **{f"precision@{k}": 0.0 for k in top_k_values},
+        **{f"hit@{k}": 0.0 for k in top_k_values},
+        "mrr": 0.0,
+    }
+    timings = []
+    details = []
+
+    for row in rows:
+        query = row["query"]
+        start = time.perf_counter()
+        payload = run_search(
+            query,
+            mode=mode,
+            top_k=max_k,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            model_name=model_name,
+            cache_dir=cache_dir,
+        )
+        timings.append(time.perf_counter() - start)
+        results = payload["results"]
+        relevant = [_is_relevant(result, row) for result in results]
+        total_relevant = max(_expected_count(row), 1)
+
+        first_hit_rank = None
+        for index, is_hit in enumerate(relevant, start=1):
+            if is_hit:
+                first_hit_rank = index
+                break
+        if first_hit_rank:
+            metric_sums["mrr"] += 1.0 / first_hit_rank
+
+        for k in top_k_values:
+            top_hits = sum(relevant[:k])
+            metric_sums[f"hit@{k}"] += 1.0 if top_hits else 0.0
+            metric_sums[f"precision@{k}"] += top_hits / k
+            metric_sums[f"recall@{k}"] += min(top_hits / total_relevant, 1.0)
+
+        details.append(
+            {
+                "query": query,
+                "expected": _expected_label(row),
+                "first_hit_rank": first_hit_rank,
+                "top": [
+                    {
+                        "rank": i,
+                        "hit": relevant[i - 1],
+                        "id": result["id"],
+                        "recipe_name": result.get("metadata", {}).get("recipe_name"),
+                        "score": result["score"],
+                        "retriever": result["retriever"],
+                        "sources": result.get("sources", [result["retriever"]]),
+                    }
+                    for i, result in enumerate(results, start=1)
+                ],
+            }
+        )
+
+    n = max(len(rows), 1)
+    metrics = {name: value / n for name, value in metric_sums.items()}
+    return {
+        "mode": mode,
+        "n_queries": len(rows),
+        "metrics": metrics,
+        "avg_time_ms": (sum(timings) / max(len(timings), 1)) * 1000,
+        "details": details,
+    }
+
+
+def compare_modes(
+    eval_path: Path = DEFAULT_EVAL,
+    *,
+    modes: tuple[str, ...] = ("keyword", "vector", "hybrid"),
+    persist_directory: Path = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION,
+    model_name: str = DEFAULT_MODEL,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+) -> dict[str, Any]:
+    reports = {}
+    for mode in modes:
+        report = evaluate(
+            eval_path,
+            mode=mode,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            model_name=model_name,
+            cache_dir=cache_dir,
+        )
+        reports[mode] = {
+            "n_queries": report["n_queries"],
+            "avg_time_ms": report["avg_time_ms"],
+            "metrics": report["metrics"],
+        }
+    return {"eval_path": str(eval_path), "reports": reports}
+
+
+def run_search(
+    query: str,
+    *,
+    mode: str,
+    top_k: int,
+    persist_directory: Path,
+    collection_name: str,
+    model_name: str,
+    cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+) -> dict[str, Any]:
+    if mode == "keyword":
+        return keyword_search(query, top_k=top_k)
+    if mode == "vector":
+        return vector_search(
+            query,
+            top_k=top_k,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            model_name=model_name,
+            cache_dir=cache_dir,
+        )
+    if mode == "hybrid":
+        return hybrid_search(
+            query,
+            top_k=top_k,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            model_name=model_name,
+            cache_dir=cache_dir,
+        )
+    raise ValueError(f"Unknown mode: {mode}")
+
+
+def _is_relevant(result: dict[str, Any], row: dict[str, Any]) -> bool:
+    expected_ids = set(row.get("expected_chunk_ids") or [])
+    expected_recipes = set(row.get("expected_recipes") or [])
+    if row.get("expected_recipe"):
+        expected_recipes.add(row["expected_recipe"])
+
+    metadata = result.get("metadata", {})
+    result_ids = {
+        result.get("id"),
+        metadata.get("id"),
+        metadata.get("chunk_id"),
+    }
+    return bool(expected_ids & result_ids) or metadata.get("recipe_name") in expected_recipes
+
+
+def _expected_count(row: dict[str, Any]) -> int:
+    if row.get("expected_chunk_ids"):
+        return len(row["expected_chunk_ids"])
+    if row.get("expected_recipes"):
+        return len(row["expected_recipes"])
+    if row.get("expected_recipe"):
+        return 1
+    return 1
+
+
+def _expected_label(row: dict[str, Any]) -> Any:
+    return row.get("expected_recipe") or row.get("expected_recipes") or row.get("expected_chunk_ids")
+
+
+def _snippet(text: str, max_chars: int = 260) -> str:
+    compact = " ".join(text.split())
+    return compact if len(compact) <= max_chars else compact[: max_chars - 3].rstrip() + "..."
+
+
+def _print_search(payload: dict[str, Any]) -> None:
+    for i, result in enumerate(payload["results"], start=1):
+        metadata = result.get("metadata", {})
+        name = metadata.get("recipe_name", "")
+        section = metadata.get("section_type", "")
+        sources = ",".join(result.get("sources", [result["retriever"]]))
+        print(f"{i}. {name} [{section}] score={result['score']:.4f} source={sources}")
+        print(f"   id: {result['id']}")
+        print(f"   keyword_rank={result.get('keyword_rank')} vector_rank={result.get('vector_rank')}")
+        print(f"   {result.get('snippet', '')}")
+
+
+def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(description="Hybrid keyword + embedding retrieval.")
+    parser.add_argument("--query", type=str, default="")
+    parser.add_argument("--mode", choices=("keyword", "vector", "hybrid"), default="hybrid")
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--eval", type=Path, default=None)
+    parser.add_argument("--compare", action="store_true", help="Evaluate keyword, vector, and hybrid modes")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--hf-cache-dir", type=Path, default=DEFAULT_HF_CACHE_DIR)
+    parser.add_argument("--chroma-dir", type=Path, default=DEFAULT_CHROMA_DIR)
+    parser.add_argument("--collection", default=DEFAULT_COLLECTION)
+    parser.add_argument("--build-vectorstore", action="store_true")
+    parser.add_argument("--reset-vectorstore", action="store_true")
+    parser.add_argument("--jsonl", type=Path, default=CHUNKS_JSONL)
+    args = parser.parse_args()
+
+    if args.build_vectorstore:
+        rebuild_vectorstore(
+            jsonl_path=args.jsonl,
+            persist_directory=args.chroma_dir,
+            collection_name=args.collection,
+            model_name=args.model,
+            cache_dir=args.hf_cache_dir,
+            reset=args.reset_vectorstore,
+        )
+        print(f"Vectorstore ready: {args.chroma_dir} / {args.collection}")
+
+    if args.eval:
+        if args.compare:
+            print(
+                json.dumps(
+                    compare_modes(
+                        args.eval,
+                        persist_directory=args.chroma_dir,
+                        collection_name=args.collection,
+                        model_name=args.model,
+                        cache_dir=args.hf_cache_dir,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return
+        print(
+            json.dumps(
+                evaluate(
+                    args.eval,
+                    mode=args.mode,
+                    persist_directory=args.chroma_dir,
+                    collection_name=args.collection,
+                    model_name=args.model,
+                    cache_dir=args.hf_cache_dir,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
+    if args.query:
+        payload = run_search(
+            args.query,
+            mode=args.mode,
+            top_k=args.top_k,
+            persist_directory=args.chroma_dir,
+            collection_name=args.collection,
+            model_name=args.model,
+            cache_dir=args.hf_cache_dir,
+        )
+        _print_search(payload)
+        return
+
+    print('Pass --query "..." or --eval data/keyword_eval_queries.jsonl')
+
+
+if __name__ == "__main__":
+    main()

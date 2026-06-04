@@ -1,5 +1,0 @@
-langchain-core
-langchain-text-splitters
-langchain-chroma
-langchain-openai
-python-dotenv
