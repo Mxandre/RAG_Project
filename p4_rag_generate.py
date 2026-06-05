@@ -5,10 +5,10 @@ Pipeline:
     user query
       -> p3_hybrid_retrieval.hybrid_search()
       -> context built from retrieved chunks
-      -> OpenAI or Gemini model answer
+      -> Gemini model answer
 
-Set ``OPENAI_API_KEY`` or ``GEMINI_API_KEY`` in the environment or in a local
-``.env`` file before running generation. Retrieval-only mode remains available through
+Set ``GEMINI_API_KEY`` in the environment or in a local ``.env`` file before running generation.
+Retrieval-only mode remains available through
 ``p3_hybrid_retrieval.py``.
 """
 
@@ -28,7 +28,6 @@ from p3_hybrid_retrieval import repair_metadata, repair_mojibake
 from p3_hybrid_retrieval import hybrid_search, run_search
 
 
-DEFAULT_LLM_MODEL = "gpt-4.1-mini"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
@@ -81,8 +80,7 @@ def generate_answer(
     retrieval_mode: str = "hybrid",
     keyword_k: int = 20,
     vector_k: int = 20,
-    llm_model: str = DEFAULT_LLM_MODEL,
-    provider: str = "openai",
+    llm_model: str = DEFAULT_GEMINI_MODEL,
     context_max_chars: int = 7000,
     temperature: float = 0.2,
     persist_directory: Path = DEFAULT_CHROMA_DIR,
@@ -90,7 +88,7 @@ def generate_answer(
     embedding_model: str = DEFAULT_MODEL,
     hf_cache_dir: Path = DEFAULT_HF_CACHE_DIR,
 ) -> dict[str, Any]:
-    """Retrieve context and generate an answer with an OpenAI or Gemini model."""
+    """Retrieve context and generate an answer with Gemini."""
     load_dotenv()
 
     if retrieval_mode == "hybrid":
@@ -116,15 +114,7 @@ def generate_answer(
         )
     context = build_context(retrieval["results"], max_chars=context_max_chars)
 
-    if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
-        return {
-            "query": query,
-            "answer": None,
-            "error": "OPENAI_API_KEY is not set. Add it to the environment or to a local .env file.",
-            "context": context,
-            "retrieval": retrieval,
-        }
-    if provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
+    if not os.getenv("GEMINI_API_KEY"):
         return {
             "query": query,
             "answer": None,
@@ -133,36 +123,17 @@ def generate_answer(
             "retrieval": retrieval,
         }
 
-    if provider == "gemini":
-        answer = _generate_with_gemini(
-            prompt=build_prompt(query, context),
-            model=llm_model,
-            temperature=temperature,
-        )
-        return {
-            "query": query,
-            "answer": answer,
-            "model": llm_model,
-            "provider": provider,
-            "context": context,
-            "retrieval": retrieval,
-        }
-
-    from openai import OpenAI
-
-    client = OpenAI()
-    response = client.responses.create(
+    answer = _generate_with_gemini(
+        prompt=build_prompt(query, context),
         model=llm_model,
-        instructions=SYSTEM_INSTRUCTIONS,
-        input=build_prompt(query, context),
         temperature=temperature,
     )
 
     return {
         "query": query,
-        "answer": response.output_text,
+        "answer": answer,
         "model": llm_model,
-        "provider": provider,
+        "provider": "gemini",
         "context": context,
         "retrieval": retrieval,
     }
@@ -204,7 +175,6 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Generate a RAG answer from hybrid retrieval.")
     parser.add_argument("--query", required=True, help="User question")
-    parser.add_argument("--provider", choices=("openai", "gemini"), default="gemini")
     parser.add_argument("--model", default=None, help="Generation model")
     parser.add_argument("--retrieval-mode", choices=("keyword", "vector", "hybrid"), default="hybrid")
     parser.add_argument("--top-k", type=int, default=5, help="Number of fused chunks used as context")
@@ -226,8 +196,7 @@ def main() -> None:
         retrieval_mode=args.retrieval_mode,
         keyword_k=args.keyword_k,
         vector_k=args.vector_k,
-        llm_model=args.model or (DEFAULT_GEMINI_MODEL if args.provider == "gemini" else DEFAULT_LLM_MODEL),
-        provider=args.provider,
+        llm_model=args.model or DEFAULT_GEMINI_MODEL,
         context_max_chars=args.context_max_chars,
         temperature=args.temperature,
         persist_directory=args.chroma_dir,

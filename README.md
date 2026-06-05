@@ -67,6 +67,44 @@ class Chunk:
 
 `recipes.jsonl` 额外保留 `meta` 字典（`prep_time`/`cook_time`/`rest_time`/`difficulty`/`servings`），不进检索正文。
 
+## 网页查询界面
+
+项目提供了一个类似 ChatGPT 的本地网页入口，用于测试关键词检索、向量检索和混合检索。
+
+首次运行先安装依赖：
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
+```
+
+Windows PowerShell 下也可以使用：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+一键启动网页：
+
+```powershell
+.\.venv\Scripts\python.exe web_app.py --host 127.0.0.1 --port 8000
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:8000
+```
+
+网页默认不调用外部大模型，只运行本地检索：
+
+- `Keyword`：BM25 / 关键词倒排索引检索
+- `Vector`：`BAAI/bge-m3` embedding + Chroma 向量检索
+- `Hybrid`：关键词结果和向量结果用 RRF 融合，推荐默认使用
+
+如果勾选 `Generate answer`，才会调用 `.env` 中配置的 `GEMINI_API_KEY`。团队演示时可以不勾选该选项，只展示本地 hybrid retrieval，避免使用个人付费 API。
+
 ## 许可证
 
 见 [LICENSE](LICENSE)。

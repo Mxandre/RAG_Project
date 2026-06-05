@@ -109,7 +109,7 @@ final_score = 0.6 * vector_score + 0.4 * keyword_score
 ## RAG Generation
 
 `p4_rag_generate.py` retrieves context with `p3_hybrid_retrieval.py` and sends
-the selected chunks to Gemini or OpenAI.
+the selected chunks to Gemini.
 
 Create a local `.env` file or set the environment variable:
 
@@ -120,23 +120,17 @@ GEMINI_API_KEY=your_gemini_api_key_here
 Generate with Gemini and hybrid retrieval:
 
 ```bash
-python p4_rag_generate.py --provider gemini --query "Quels ingrédients faut-il pour un risotto aux champignons ?" --top-k 5
+python p4_rag_generate.py --query "Quels ingrédients faut-il pour un risotto aux champignons ?" --top-k 5
 ```
 
 Use keyword-only retrieval if the embedding model is unavailable:
 
 ```bash
-python p4_rag_generate.py --provider gemini --retrieval-mode keyword --query "Quels ingrédients faut-il pour un risotto aux champignons ?"
+python p4_rag_generate.py --retrieval-mode keyword --query "Quels ingrédients faut-il pour un risotto aux champignons ?"
 ```
 
 Debug the exact retrieved context:
 
 ```bash
 python p4_rag_generate.py --query "comment préparer un risotto aux asperges ?" --show-context
-```
-
-Use OpenAI instead:
-
-```bash
-python p4_rag_generate.py --provider openai --model gpt-4.1-mini --query "Quels ingrédients faut-il pour un risotto aux champignons ?"
 ```
