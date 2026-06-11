@@ -1,13 +1,12 @@
-"""Small ChatGPT-style web UI for the recipe RAG project.
+"""Petite interface web de type chat pour le projet RAG de recettes.
 
 Run:
 
     python web_app.py --host 127.0.0.1 --port 8000
 
-The app intentionally uses only the Python standard library for HTTP serving.
-It calls the existing retrieval/generation modules directly instead of going
-through a shell command, so UTF-8 text stays as Python Unicode strings inside
-the process.
+L'application utilise uniquement la bibliothèque standard Python pour servir
+HTTP. Elle appelle directement les modules de recherche et de génération afin
+de conserver les textes UTF-8 sous forme de chaînes Unicode Python.
 """
 
 from __future__ import annotations
@@ -24,25 +23,25 @@ from urllib.parse import urlparse
 
 from p3_hybrid_retrieval import DEFAULT_CHROMA_DIR, DEFAULT_COLLECTION, DEFAULT_HF_CACHE_DIR, DEFAULT_MODEL
 from p3_hybrid_retrieval import repair_metadata, repair_mojibake, run_search
-from p4_rag_generate import DEFAULT_GEMINI_MODEL, generate_answer
+from p4_rag_generate import DEFAULT_GEMINI_MODEL, classify_query_intent, generate_answer, non_recipe_response
 
 
-APP_TITLE = "Recipe RAG Chat"
+APP_TITLE = "Assistant RAG de recettes"
 
 
 def retrieval_answer(query: str, results: list[dict[str, Any]]) -> str:
-    """Build a compact answer when no external LLM generation is requested."""
+    """Construit une réponse courte sans génération par LLM externe."""
     if not results:
-        return "No matching recipe chunks were found."
+        return "Aucun extrait de recette correspondant n'a été trouvé."
 
     lines = [
-        f"I found {len(results)} relevant recipe chunk(s) for: {query}",
+        f"J'ai trouvé {len(results)} extrait(s) pertinent(s) pour : {query}",
         "",
-        "Top sources:",
+        "Meilleures sources :",
     ]
-    for index, result in enumerate(results[:5], start=1):
+    for index, result in enumerate(results, start=1):
         metadata = repair_metadata(result.get("metadata", {}))
-        recipe = metadata.get("recipe_name", "Unknown recipe")
+        recipe = metadata.get("recipe_name", "Recette inconnue")
         section = metadata.get("section_type", "unknown")
         source = ",".join(result.get("sources", [result.get("retriever", "")]))
         snippet = repair_mojibake(result.get("snippet") or result.get("text", ""))
@@ -76,15 +75,20 @@ def compact_result(result: dict[str, Any]) -> dict[str, Any]:
 def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
     query = str(payload.get("query", "")).strip()
     if not query:
-        raise ValueError("Query is required.")
+        raise ValueError("La question est obligatoire.")
 
     mode = payload.get("mode") or "hybrid"
     if mode not in {"keyword", "vector", "hybrid"}:
-        raise ValueError("Mode must be keyword, vector, or hybrid.")
+        raise ValueError("Le mode doit être keyword, vector ou hybrid.")
 
     top_k = int(payload.get("top_k") or 5)
     top_k = max(1, min(top_k, 20))
     generate = bool(payload.get("generate"))
+
+    if not generate and not classify_query_intent(query).get("is_recipe_related"):
+        response = non_recipe_response(query)
+        response["mode"] = mode
+        return response
 
     if generate:
         model = payload.get("model") or DEFAULT_GEMINI_MODEL
@@ -100,6 +104,10 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 hf_cache_dir=DEFAULT_HF_CACHE_DIR,
             )
         except Exception as exc:
+            if not classify_query_intent(query).get("is_recipe_related"):
+                response = non_recipe_response(query)
+                response["mode"] = mode
+                return response
             retrieval = run_search(
                 query,
                 mode=mode,
@@ -114,7 +122,7 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 "query": query,
                 "mode": mode,
                 "answer": retrieval_answer(query, results),
-                "error": f"Generation failed; showing retrieval results instead. {exc}",
+                "error": f"La génération a échoué ; affichage des résultats de recherche à la place. {exc}",
                 "analysis": retrieval.get("analysis", {}),
                 "results": results,
             }
@@ -159,17 +167,17 @@ class RagChatHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send_json({"ok": True})
             return
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        self.send_error(HTTPStatus.NOT_FOUND, "Introuvable")
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         path = urlparse(self.path).path
         if path != "/api/chat":
-            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            self.send_error(HTTPStatus.NOT_FOUND, "Introuvable")
             return
         try:
             payload = self._read_json()
             self._send_json(handle_chat(payload))
-        except Exception as exc:  # Keep the UI useful during local debugging.
+        except Exception as exc:  # Renvoie l'erreur au client pendant les essais locaux.
             traceback.print_exc()
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
@@ -199,11 +207,11 @@ class RagChatHandler(BaseHTTPRequestHandler):
 
 
 INDEX_HTML = r"""<!doctype html>
-<html lang="en">
+<html lang="fr">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Recipe RAG Chat</title>
+  <title>Assistant RAG de recettes</title>
   <style>
     :root {
       color-scheme: light;
@@ -436,43 +444,43 @@ INDEX_HTML = r"""<!doctype html>
 <body>
   <div class="app">
     <aside>
-      <div class="brand">Recipe RAG Chat</div>
+      <div class="brand">Assistant RAG de recettes</div>
       <div class="control">
-        <label for="mode">Retrieval</label>
+        <label for="mode">Recherche</label>
         <select id="mode">
-          <option value="hybrid" selected>Hybrid</option>
-          <option value="keyword">Keyword</option>
-          <option value="vector">Vector</option>
+          <option value="hybrid" selected>Hybride</option>
+          <option value="keyword">Mots-clés</option>
+          <option value="vector">Vectorielle</option>
         </select>
       </div>
       <div class="control">
-        <label for="topK">Top K</label>
+        <label for="topK">Nombre de résultats</label>
         <input id="topK" type="number" min="1" max="20" value="5" />
       </div>
       <label class="toggle">
-        <input id="generate" type="checkbox" />
-        Generate answer
+        <input id="generate" type="checkbox" checked />
+        Générer une réponse
       </label>
       <p class="hint">
-        Default mode returns retrieval-backed answers without calling an external LLM.
-        Enable generation only when your API key is configured in <code>.env</code>.
+        Par défaut, l'application répond à partir des résultats retrouvés sans appeler de LLM externe.
+        Activez la génération uniquement si votre clé API est configurée dans <code>.env</code>.
       </p>
     </aside>
     <main>
       <header>
-        <h1>Ask your recipe corpus</h1>
-        <p>Keyword index + vector search, served through the existing Python modules.</p>
+        <h1>Interrogez votre corpus de recettes</h1>
+        <p>Index de mots-clés et recherche vectorielle servis par les modules Python existants.</p>
       </header>
       <section id="messages" class="messages">
         <div class="message assistant">
           <div class="avatar">R</div>
-          <div class="bubble">Ask about ingredients, preparation steps, or recipe names. Try: quels ingredients pour un risotto aux champignons ?</div>
+          <div class="bubble">Posez une question sur les ingrédients, les étapes ou les noms de recettes. Essayez : quels ingrédients pour un risotto aux champignons ?</div>
         </div>
       </section>
       <section class="composer">
         <form id="chatForm">
-          <textarea id="query" placeholder="Ask a question..." rows="1"></textarea>
-          <button id="send" type="submit" title="Send">↑</button>
+          <textarea id="query" placeholder="Posez une question..." rows="1"></textarea>
+          <button id="send" type="submit" title="Envoyer">↑</button>
         </form>
         <div id="error" class="error"></div>
       </section>
@@ -490,7 +498,7 @@ INDEX_HTML = r"""<!doctype html>
       node.className = `message ${role}`;
       const avatar = document.createElement("div");
       avatar.className = "avatar";
-      avatar.textContent = role === "user" ? "U" : "R";
+      avatar.textContent = role === "user" ? "V" : "R";
       const bubble = document.createElement("div");
       bubble.className = "bubble";
       bubble.textContent = text;
@@ -504,13 +512,13 @@ INDEX_HTML = r"""<!doctype html>
     function renderSources(results) {
       const wrap = document.createElement("div");
       wrap.className = "sources";
-      results.slice(0, 5).forEach((item, index) => {
+      results.forEach((item, index) => {
         const metadata = item.metadata || {};
         const source = document.createElement("div");
         source.className = "source";
         const title = document.createElement("div");
         title.className = "source-title";
-        title.innerHTML = `<span>${index + 1}. ${escapeHtml(metadata.recipe_name || "Unknown recipe")}</span><span>${Number(item.score || 0).toFixed(4)}</span>`;
+        title.innerHTML = `<span>${index + 1}. ${escapeHtml(metadata.recipe_name || "Recette inconnue")}</span><span>${Number(item.score || 0).toFixed(4)}</span>`;
         const body = document.createElement("div");
         body.textContent = item.snippet || item.text || "";
         const chips = document.createElement("div");
@@ -560,7 +568,7 @@ INDEX_HTML = r"""<!doctype html>
       query.value = "";
       query.style.height = "auto";
       send.disabled = true;
-      addMessage("assistant", "Searching...");
+      addMessage("assistant", "Recherche en cours...");
       const loading = messages.lastElementChild;
       try {
         const response = await fetch("/api/chat", {
@@ -576,15 +584,15 @@ INDEX_HTML = r"""<!doctype html>
         const payload = await response.json();
         loading.remove();
         if (!response.ok || payload.error) {
-          addMessage("assistant", payload.answer || payload.error || "Request failed.", payload.results || []);
+          addMessage("assistant", payload.answer || payload.error || "La requête a échoué.", payload.results || []);
           if (payload.error) error.textContent = payload.error;
         } else {
-          addMessage("assistant", payload.answer || "No answer.", payload.results || []);
+          addMessage("assistant", payload.answer || "Aucune réponse.", payload.results || []);
         }
       } catch (err) {
         loading.remove();
         error.textContent = err.message || String(err);
-        addMessage("assistant", "The local server returned an error.");
+        addMessage("assistant", "Le serveur local a renvoyé une erreur.");
       } finally {
         send.disabled = false;
         query.focus();
@@ -600,23 +608,23 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description=f"Run {APP_TITLE}.")
+    parser = argparse.ArgumentParser(description=f"Lancer {APP_TITLE}.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
     project_dir = Path(__file__).resolve().parent
-    # Existing modules use relative data/chroma paths; make them stable no
-    # matter where the command is launched from.
+    # Les modules existants utilisent des chemins relatifs vers data/chroma.
+    # On stabilise le répertoire de travail quel que soit le point de lancement.
     import os
 
     os.chdir(project_dir)
     server = ThreadingHTTPServer((args.host, args.port), RagChatHandler)
-    print(f"{APP_TITLE} running at http://{args.host}:{args.port}")
+    print(f"{APP_TITLE} disponible sur http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping server.")
+        print("\nArrêt du serveur.")
     finally:
         server.server_close()
 

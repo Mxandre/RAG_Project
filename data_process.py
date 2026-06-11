@@ -8,7 +8,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import hashlib
 
-        
+
 def jsonl_to_documents(
     jsonl_path: str | Path,
     *,
@@ -27,13 +27,13 @@ def jsonl_to_documents(
             item: dict[str, Any] = json.loads(line)
             text = item.get(text_field)
             if not isinstance(text, str) or not text.strip():
-                raise ValueError(f"Line {line_no} missing non-empty '{text_field}'")
+                raise ValueError(f"Ligne {line_no} : le champ '{text_field}' est manquant ou vide")
 
             raw_metadata = item.get(metadata_field, {})
             if raw_metadata is None:
                 raw_metadata = {}
             if not isinstance(raw_metadata, dict):
-                raise ValueError(f"Line {line_no} field '{metadata_field}' must be an object")
+                raise ValueError(f"Ligne {line_no} : le champ '{metadata_field}' doit être un objet")
 
             metadata = {
                 **raw_metadata,
@@ -67,11 +67,12 @@ def build_chroma_vectorstore(
         chunk.metadata["chunk_id"] = chunk_id
     return Chroma.from_documents(
         documents=chunks,
-        ids = chunk_ids,
+        ids=chunk_ids,
         embedding=embeddings,
         persist_directory=str(persist_directory),
         collection_name=collection_name,
     )
+
 
 def _make_chunk_id(chunk):
     raw = f"{chunk.metadata.get('id','')}::{chunk.page_content}"

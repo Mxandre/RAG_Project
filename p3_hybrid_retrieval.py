@@ -1,12 +1,12 @@
-"""Hybrid retrieval: keyword index + embedding vector search.
+"""Recherche hybride : index de mots-clés + recherche vectorielle.
 
-This script combines:
+Ce script combine :
 
-- keyword retrieval from ``p2_keyword_retrieval.py``
-- vector retrieval from Chroma built by ``data_process.py``
+- la recherche par mots-clés de ``p2_keyword_retrieval.py``
+- la recherche vectorielle Chroma construite par ``data_process.py``
 
-Fusion uses Reciprocal Rank Fusion (RRF), which is robust because BM25 scores
-and vector distances are not on the same scale.
+La fusion utilise Reciprocal Rank Fusion (RRF), robuste lorsque les scores BM25
+et les distances vectorielles ne sont pas sur la même échelle.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def repair_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def make_embeddings(model_name: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_HF_CACHE_DIR):
-    """Create the HuggingFace embedding function lazily."""
+    """Crée la fonction d'embedding HuggingFace à la demande."""
     from langchain_huggingface import HuggingFaceEmbeddings
 
     cache_dir = Path(cache_dir)
@@ -188,9 +188,9 @@ def hybrid_search(
             fused[result_id][f"{source}_rank"] = rank
             fused[result_id][f"{source}_score"] = result.get("score", 0.0)
 
-            # Keyword results are loaded from the current JSONL and preserve
-            # cleaner text/metadata. Vector hits still contribute rank and can
-            # fill vector-only results, but should not overwrite keyword text.
+            # Les résultats mots-clés viennent du JSONL courant et gardent le
+            # texte le plus propre. Les résultats vectoriels complètent le rang
+            # et les entrées absentes, sans écraser ce texte.
             if source == "vector" and "keyword" not in fused[result_id]["sources"]:
                 fused[result_id]["text"] = result["text"]
                 fused[result_id]["snippet"] = result["snippet"]
@@ -355,7 +355,7 @@ def run_search(
             model_name=model_name,
             cache_dir=cache_dir,
         )
-    raise ValueError(f"Unknown mode: {mode}")
+    raise ValueError(f"Mode inconnu : {mode}")
 
 
 def _is_relevant(result: dict[str, Any], row: dict[str, Any]) -> bool:
@@ -408,12 +408,12 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="Hybrid keyword + embedding retrieval.")
+    parser = argparse.ArgumentParser(description="Recherche hybride par mots-clés et embeddings.")
     parser.add_argument("--query", type=str, default="")
     parser.add_argument("--mode", choices=("keyword", "vector", "hybrid"), default="hybrid")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--eval", type=Path, default=None)
-    parser.add_argument("--compare", action="store_true", help="Evaluate keyword, vector, and hybrid modes")
+    parser.add_argument("--compare", action="store_true", help="Évaluer les modes mots-clés, vectoriel et hybride")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--hf-cache-dir", type=Path, default=DEFAULT_HF_CACHE_DIR)
     parser.add_argument("--chroma-dir", type=Path, default=DEFAULT_CHROMA_DIR)
@@ -432,7 +432,7 @@ def main() -> None:
             cache_dir=args.hf_cache_dir,
             reset=args.reset_vectorstore,
         )
-        print(f"Vectorstore ready: {args.chroma_dir} / {args.collection}")
+        print(f"Base vectorielle prête : {args.chroma_dir} / {args.collection}")
 
     if args.eval:
         if args.compare:
@@ -479,7 +479,7 @@ def main() -> None:
         _print_search(payload)
         return
 
-    print('Pass --query "..." or --eval data/keyword_eval_queries.jsonl')
+    print('Passez --query "..." ou --eval data/keyword_eval_queries.jsonl')
 
 
 if __name__ == "__main__":
