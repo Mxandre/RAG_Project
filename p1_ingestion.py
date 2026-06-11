@@ -1,8 +1,8 @@
-"""P1 Ingestion — RAG 数据加载/清洗/分块.
+"""P1 Ingestion — chargement / nettoyage / découpage RAG.
 
-Pipeline: crawl (下载 HTML) -> parse (抽 name/ingredients/steps) -> chunk.
-对外主接口: run() -> list[Chunk].
-语料: https://jemangefrancais.com/blog/categorie/recettes.html (法语菜谱).
+Pipeline : crawl (HTML) -> parse (name/ingredients/steps) -> chunk.
+Interface publique : run() -> list[Chunk].
+Corpus : https://jemangefrancais.com/blog/categorie/recettes.html.
 """
 
 from __future__ import annotations
@@ -32,45 +32,45 @@ CHUNKS_JSONL = DATA_DIR / "chunks.jsonl"
 UNPARSED_MD = DATA_DIR / "unparsed.md"
 PARSING_REPORT_MD = Path("docs") / "p1_parsing_report.md"
 
-# 段落标记 (法语). 站点结构异构: 标记现于 h2/h3/strong/p/div.
+# Marqueurs de section. Mise en page hétérogène : h2/h3/strong/p/div.
 _RE_INGRED = re.compile(r"ingr[ée]dient", re.I)
-# 步骤标记: 关键词 + 序数式 "1ère étape" / "2ème étape" / "3e étape".
+# Étapes : mots-clés + ordinaux "1ère étape" / "2ème étape" / "3e étape".
 _RE_STEP_ORD = r"\d+\s*(?:ère|ere|ème|eme|e)\s+étape"
 _RE_STEP = re.compile(rf"pr[ée]paration|pr[ée]parer|\bétapes?\b|\betapes?\b|montage|r[ée]alisation|instruction|{_RE_STEP_ORD}", re.I)
-# 锚定版 (行首): 用于内容元素长段落, 仅行首关键词才算标记, 防中部含词误判.
+# Version ancrée (début de ligne) pour <p>/<li> longs : évite faux positifs en milieu de phrase.
 _RE_ANCHOR = re.compile(rf"^\W*(?:ingr[ée]dient|pr[ée]paration|pr[ée]parer|étapes?|etapes?|montage|r[ée]alisation|instruction|{_RE_STEP_ORD})", re.I)
-# 多菜谱 h3 编号头, e.g. "1. Risotto aux champignons sauvages".
+# Sous-titres numérotés multi-recettes, ex. "1. Risotto aux champignons sauvages".
 _RE_SUBHEAD_NUM = re.compile(r"^\s*\d+\.\s+\w", re.I)
-# 隐式步骤段提示: 短冒号标题含 "recette/façon" 多为 "La recette de X :" 步骤起点.
+# Indice d'étapes implicites : titre court à deux points contenant "recette/façon".
 _RE_STEP_HINT = re.compile(r"\brecette\b|\bfa[cç]on\b", re.I)
-# 结尾/旁支标题 — 关闭当前段落, 防 conclusion/conseils 等正文泄漏入 sections.
-# 边界锚定: 防 "déconseillons"/"déconseillée" 等步骤正文里的派生词触发关段.
+# Titres de fin/hors-sujet — ferment la section courante (évite conclusion/conseils en prose).
+# Ancrage \b : évite "déconseillons"/"déconseillée" en plein texte d'étape.
 _RE_END = re.compile(r"\b(?:conclusion|conseils?|astuces?|variantes?|le saviez|bon app|buon app|pour conclure|pourquoi)\b", re.I)
-# metadata 行 (非原料/步骤) — 抽成独立字段, 不进 sections. 也防 "Temps de préparation" 误判 step.
+# Lignes metadata — extraites en champ propre, hors sections. Évite "Temps de préparation" en step.
 _RE_PREP_TIME = re.compile(r"temps de pr[ée]paration\s*:?\s*(.+)", re.I)
 _RE_COOK_TIME = re.compile(r"temps de cuisson\s*:?\s*(.+)", re.I)
 _RE_REST_TIME = re.compile(r"temps de repos\s*:?\s*(.+)", re.I)
-# 裸标签时长行: "Préparation : 15 minutes" / "Cuisson : 10 min" / "Marinade : 30 minutes".
-# 仅当冒号后是纯时长才算 metadata (区别于 "Préparation :" 步骤段标题).
+# Étiquettes nues : "Préparation : 15 minutes" / "Cuisson : 10 min" / "Marinade : 30 minutes".
+# metadata seulement si la valeur après ":" est une durée pure (distingue du titre de section).
 _DUR = r"\d+\s*(?:[àa-]\s*\d+\s*)?(?:min|minutes?|mn|h|heures?|jours?|secondes?)\b"
 _RE_TIME_INLINE = re.compile(
     rf"^(?P<label>pr[ée]paration|cuisson|marinade|repos|r[ée]frig[ée]ration)\b[^:]*:\s*{_DUR}", re.I)
 _RE_DIFFICULTY = re.compile(r"difficult[ée]\s*:?\s*(.+)", re.I)
 _RE_SERVINGS = re.compile(r"pour\s+(\d[\d\s àa-]*?(?:personne|pot|part|convive)\w*)", re.I)
 _RE_META_LINE = re.compile(r"temps de (pr[ée]paration|cuisson|repos)|^difficult", re.I)
-# 纯时长行 (如 "25 minutes" / "1 h 30") — 多为 "Temps de cuisson :" 标签的分离值, 噪声.
+# Lignes "durée pure" ("25 minutes" / "1 h 30") — valeur détachée d'une étiquette, bruit.
 _RE_PURE_DUR = re.compile(r"^\d+\s*(?:[àa-]\s*\d+\s*)?(min|minutes?|mn|h|heures?|jours?|secondes?)\b\.?$", re.I)
 
 
 @dataclass
 class Chunk:
-    id: str          # f"{slug}::{section_type}" (steps 多块时追加 ::{idx})
-    text: str        # 检索正文: BM25 索引 + 向量 embed
+    id: str          # f"{slug}::{section_type}" (suffixe ::{idx} si steps multi-blocs)
+    text: str        # corps indexé : BM25 + embedding vectoriel
     metadata: dict   # {recipe_name, source_url, section_type, [servings, difficulty]}
 
 
 # --------------------------------------------------------------------------- #
-# Stage 1: crawl
+# Étape 1 : crawl
 # --------------------------------------------------------------------------- #
 def _page_url(n: int) -> str:
     return CATEGORY_URL if n == 1 else f"{BASE}/blog/categorie/{n}/recettes.html"
@@ -88,7 +88,7 @@ def _get(url: str) -> requests.Response:
 
 
 def collect_article_urls(max_pages: int | None = None, delay: float = 1.0) -> list[str]:
-    """遍历分类页所有分页, 收集去重的详情页 URL."""
+    """Parcourt toutes les pages de la catégorie, collecte les URLs d'articles (dédupliquées)."""
     seen: set[str] = set()
     ordered: list[str] = []
     n = 1
@@ -97,7 +97,7 @@ def collect_article_urls(max_pages: int | None = None, delay: float = 1.0) -> li
         try:
             html = _get(url).text
         except requests.HTTPError as e:
-            log.info("分页停止 @ page %d (%s)", n, e)
+            log.info("pagination arrêtée @ page %d (%s)", n, e)
             break
         soup = BeautifulSoup(html, "html.parser")
         page_links = [
@@ -107,19 +107,19 @@ def collect_article_urls(max_pages: int | None = None, delay: float = 1.0) -> li
         ]
         new = [u for u in dict.fromkeys(page_links) if u not in seen]
         if not new:
-            log.info("分页停止 @ page %d (无新链接)", n)
+            log.info("pagination arrêtée @ page %d (aucun nouveau lien)", n)
             break
         for u in new:
             seen.add(u)
             ordered.append(u)
-        log.info("page %d: +%d 详情页 (累计 %d)", n, len(new), len(ordered))
+        log.info("page %d : +%d articles (total %d)", n, len(new), len(ordered))
         n += 1
         time.sleep(delay)
     return ordered
 
 
 def crawl(max_pages: int | None = None, raw_dir: Path = RAW_DIR, delay: float = 1.0) -> list[Path]:
-    """下载全部详情页 HTML 到 raw_dir. 已存在则跳过 (增量). 返回本地路径列表."""
+    """Télécharge le HTML des articles dans raw_dir. Saute les fichiers existants (incrémental)."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     urls = collect_article_urls(max_pages=max_pages, delay=delay)
     paths: list[Path] = []
@@ -132,18 +132,18 @@ def crawl(max_pages: int | None = None, raw_dir: Path = RAW_DIR, delay: float = 
         try:
             html = _get(url).text
         except requests.HTTPError as e:
-            log.warning("下载失败 %s (%s)", url, e)
+            log.warning("échec téléchargement %s (%s)", url, e)
             continue
         path.write_text(html, encoding="utf-8")
         paths.append(path)
-        log.info("下载 %s", slug)
+        log.info("téléchargé %s", slug)
         time.sleep(delay)
-    log.info("crawl 完成: %d HTML", len(paths))
+    log.info("crawl terminé : %d HTML", len(paths))
     return paths
 
 
 # --------------------------------------------------------------------------- #
-# Stage 2: parse
+# Étape 2 : parse
 # --------------------------------------------------------------------------- #
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
@@ -158,7 +158,7 @@ def _section_of(text: str) -> str | None:
 
 
 def _extract_name(soup: BeautifulSoup) -> str:
-    """菜名: og:title 最干净, 回退 <h1> / <title> (去站点后缀)."""
+    """Nom de la recette : og:title prioritaire, fallback <h1> / <title> (suffixe site nettoyé)."""
     og = soup.find("meta", attrs={"property": "og:title"})
     if og and og.get("content"):
         return _clean(og["content"])
@@ -176,39 +176,40 @@ _TIME_LABEL_KEY = {"préparation": "prep_time", "preparation": "prep_time",
 
 
 def _try_meta(text: str, meta: dict) -> bool:
-    """metadata 行 → 抽进 meta dict. 命中返回 True (调用方据此跳过, 不进 sections)."""
+    """Ligne metadata → extraite dans meta. Retourne True si capturée (l'appelant saute la ligne)."""
     for key, rx in (("prep_time", _RE_PREP_TIME), ("cook_time", _RE_COOK_TIME),
                     ("rest_time", _RE_REST_TIME), ("difficulty", _RE_DIFFICULTY)):
         m = rx.match(text)
-        if m and re.search(r"\w", m.group(1)):  # 值含实字符 (排除 "Temps de préparation :" 无值)
+        if m and re.search(r"\w", m.group(1)):  # valeur non vide (rejette "Temps de préparation :" seul)
             meta.setdefault(key, _clean(m.group(1)))
             return True
-    m = _RE_TIME_INLINE.match(text)  # 裸标签时长 "Préparation : 15 minutes"
+    m = _RE_TIME_INLINE.match(text)  # étiquette nue : "Préparation : 15 minutes"
     if m:
         key = _TIME_LABEL_KEY.get(m.group("label").lower())
         if key:
             meta.setdefault(key, _clean(re.sub(r"^[^:]*:\s*", "", text)))
         return True
     if _RE_META_LINE.search(text) or _RE_PURE_DUR.match(text):
-        return True  # metadata 关键词无值 / 分离的纯时长值 — 跳过, 防进 section
+        return True  # mot-clé metadata sans valeur ou durée pure détachée — sauté
     sv = _RE_SERVINGS.search(text)
     if sv and len(text) < 45 and not _RE_INGRED.search(text):
-        # 短 servings 行 (如 "Recette pour 4 à 6 personnes"). 排除 "Ingrédients pour N personnes :"
-        # 这种同时含 ingrédient 关键词的标记, 否则会吞掉原料段标记 (girolles / riz-rouge bug).
+        # Ligne courte de portions ("Recette pour 4 à 6 personnes"). Exclut "Ingrédients pour N personnes :"
+        # qui contient aussi "ingrédient", sinon vol du marqueur de section (bug girolles / riz-rouge).
         meta.setdefault("servings", _clean(sv.group(0)))
         return True
     return False
 
 
 def _walk(descendants, *, default_ingredients: bool = True) -> tuple[list[str], list[str], dict, bool]:
-    """单遍扫给定 descendants 序列, 抽 ingredients/steps/meta. 末位 bool=是否命中显式关键词标记.
+    """Parcours en un passage : extrait ingredients/steps/meta. Bool final = marqueur explicite vu.
 
-    显式标记 = section_of 命中 (ingrédient/préparation/étape/...) 或 _RE_STEP_HINT (recette/façon).
-    标记规则: 标题/strong/b 元素 — 命中关键词切段, h2 非命中=硬关段.
-    内容元素 (p/li/div 叶子) — 锚定行首关键词 或 冒号结尾标题 → 切段.
-    短冒号子标题 (`Le brownie :`) — current=None 时假设进入 ingredients (entremet 子组).
-    `<li>` / 散文 `<p>` 出现而 current=None → fallback 入 ingredients (cepe-bordeaux 无显式 header).
-    `current=ingredients` 下遇散文 `<p>` 无 dash 前缀 → 切到 steps (riz-rouge 无显式步骤标记).
+    Marqueur explicite = section_of (ingrédient/préparation/étape/...) ou _RE_STEP_HINT (recette/façon).
+    Règles :
+    - Titres/strong/b : mot-clé → change la section ; h2 sans mot-clé = fermeture dure.
+    - Feuilles p/li/div : ancrage début de ligne ou titre à deux points → change la section.
+    - Sous-titre court à deux points (`Le brownie :`), current=None → entre dans ingredients (sous-groupes entremet).
+    - <li> ou <p> en prose sans section → fallback ingredients (cepe-bordeaux sans en-tête explicite).
+    - current=ingredients + <p> long sans tiret → bascule vers steps (riz-rouge sans marqueur d'étapes).
     """
     ingredients: list[str] = []
     steps: list[str] = []
@@ -259,9 +260,9 @@ def _walk(descendants, *, default_ingredients: bool = True) -> tuple[list[str], 
                     add(rest)
                 continue
 
-            # 短冒号子标题无关键词. 区分两路:
-            # — 含 "recette/façon" → 步骤段起点 (girolles "La recette de X :").
-            # — 否则: 原料子组标签 (entremet "Le brownie :"/"Mousse chocolat :").
+            # Sous-titre court à deux points sans mot-clé. Deux cas :
+            # — contient "recette/façon" → début d'étapes (girolles "La recette de X :").
+            # — sinon : étiquette de sous-groupe d'ingrédients (entremet "Le brownie :"/"Mousse chocolat :").
             if colon_short and sec is None and not _RE_END.search(txt):
                 if _RE_STEP_HINT.search(txt):
                     current = "steps"
@@ -277,13 +278,13 @@ def _walk(descendants, *, default_ingredients: bool = True) -> tuple[list[str], 
                 current = None
                 continue
 
-            # `<p>` 散文转步骤: 原料段中遇到非 dash 长散文 → 隐式步骤起点 (riz-rouge).
+            # <p> prose en pleine section ingredients → bascule implicite vers steps (riz-rouge).
             if (tag == "p" and current == "ingredients"
                     and not txt.lstrip().startswith(("-", "–", "•", "—"))
                     and len(txt) > 50):
                 current = "steps"
 
-            # `<li>` fallback: 未声明段落 → 默认原料 (cepe-bordeaux).
+            # <li> sans section précédente → ingredients par défaut (cepe-bordeaux).
             if tag == "li" and current is None and default_ingredients:
                 current = "ingredients"
 
@@ -301,10 +302,10 @@ def _parse_standard(box: Tag, name: str, source_url: str) -> dict | None:
             meta["servings"] = _clean(sv.group(0))
 
     if not name or not steps:
-        # 要求步骤段必须解析到 — 仅原料 (crepes div-only) 多为低质布局, 弃.
+        # Section steps obligatoire — ingredients seuls (ex. crepes div-only) = mise en page pauvre, rejeté.
         return None
     if not explicit_seen:
-        # 无任何显式关键词标记 → 全靠 fallback 抓的 li/p, 多为列表式文章 (tapas/crepes).
+        # Aucun marqueur explicite → tout vient des fallback li/p, typique des articles-liste (tapas/crepes).
         return None
 
     return {
@@ -318,9 +319,9 @@ def _parse_standard(box: Tag, name: str, source_url: str) -> dict | None:
 
 
 def _multi_sub_headings(box: Tag) -> list[Tag]:
-    """编号 h3 子菜谱头列表 (`1. Risotto aux ...`).
+    """Liste des h3 numérotés sous-recettes (`1. Risotto aux ...`).
 
-    排除步骤分节型 h3 (`1. Préparation :` / `2. Cuisson :`) — 它们是步骤章节而非独立菜谱.
+    Exclut les h3 de découpage d'étapes (`1. Préparation :` / `2. Cuisson :`) — ce sont des sections, pas des recettes.
     """
     out: list[Tag] = []
     for h in box.find_all("h3"):
@@ -329,7 +330,7 @@ def _multi_sub_headings(box: Tag) -> list[Tag]:
             continue
         if _section_of(text) is not None:
             continue
-        # 冒号终结 ("1. Préparation :", "2. Cuisson :") 是步骤章节, 非子菜谱.
+        # Fin par ":" ("1. Préparation :", "2. Cuisson :") = sections d'étapes, pas sous-recettes.
         if text.rstrip().endswith(":"):
             continue
         out.append(h)
@@ -337,7 +338,7 @@ def _multi_sub_headings(box: Tag) -> list[Tag]:
 
 
 def _slice_after(start: Tag, stop: Tag | None):
-    """yield start 之后到 stop 之前的所有 descendants (深度优先)."""
+    """Itère tous les descendants entre start et stop (parcours en profondeur)."""
     seen = False
     for el in start.parent.descendants if start.parent else []:
         if el is start:
@@ -351,7 +352,7 @@ def _slice_after(start: Tag, stop: Tag | None):
 
 
 def _parse_multi(box: Tag, source_url: str) -> list[dict]:
-    """多菜谱页 — 每个编号 h3 切一个子记录, 各自运行 _walk."""
+    """Page multi-recettes — un sous-enregistrement par h3 numéroté, _walk indépendant pour chacun."""
     heads = _multi_sub_headings(box)
     base_slug = _slug_from_article_url(source_url)
     out: list[dict] = []
@@ -373,19 +374,19 @@ def _parse_multi(box: Tag, source_url: str) -> list[dict]:
 
 
 def _classify(box: Tag) -> str:
-    """multi=≥2 编号 h3; 否则 standard (parser 自判能否抽出, None 时上层归 skip)."""
+    """multi = ≥ 2 h3 numérotés ; sinon standard (le parser juge ensuite s'il peut extraire)."""
     if len(_multi_sub_headings(box)) >= 2:
         return "multi"
     return "standard"
 
 
 def parse_recipe(html: str, source_url: str) -> list[dict] | None:
-    """分类后路由: multi/standard/skip. None=skip 或解析失败."""
+    """Dispatcher : multi/standard/skip. None = saut ou échec."""
     soup = BeautifulSoup(html, "html.parser")
     name = _extract_name(soup)
     box = soup.select_one("div.blog_description") or soup.select_one("div.post-details")
     if box is None:
-        log.warning("无正文容器: %s", source_url)
+        log.warning("aucun conteneur de contenu : %s", source_url)
         return None
 
     kind = _classify(box)
@@ -393,11 +394,11 @@ def parse_recipe(html: str, source_url: str) -> list[dict] | None:
         recs = _parse_multi(box, source_url)
         if recs:
             return recs
-        log.warning("multi 分类但无子记录, 回退 standard: %s", source_url)
+        log.warning("classé multi mais aucun sous-enregistrement, fallback standard : %s", source_url)
 
     rec = _parse_standard(box, name, source_url)
     if rec is None:
-        log.warning("关键字段缺失, 跳过: %s", source_url)
+        log.warning("champs essentiels manquants, sauté : %s", source_url)
         return None
     return [rec]
 
@@ -407,7 +408,7 @@ def _url_from_raw_path(path: Path) -> str:
 
 
 def _skip_reason(html: str) -> str:
-    """诊断 None 返回原因 (报告用)."""
+    """Diagnostic du rejet (pour le rapport)."""
     soup = BeautifulSoup(html, "html.parser")
     box = soup.select_one("div.blog_description") or soup.select_one("div.post-details")
     if box is None:
@@ -422,7 +423,7 @@ def _skip_reason(html: str) -> str:
 
 
 def build_recipes_jsonl(raw_dir: Path = RAW_DIR, out: Path = RECIPES_JSONL) -> Path:
-    """解析 raw_dir 全部 HTML → recipes.jsonl. 同时落 unparsed.md + parsing_report.md."""
+    """Parse tous les HTML de raw_dir → recipes.jsonl. Écrit aussi unparsed.md + parsing_report.md."""
     out.parent.mkdir(parents=True, exist_ok=True)
     n_total = 0
     n_standard = 0
@@ -439,7 +440,7 @@ def build_recipes_jsonl(raw_dir: Path = RAW_DIR, out: Path = RECIPES_JSONL) -> P
                 unparsed.append((path.stem, _skip_reason(html)))
                 continue
             for rec in recs:
-                # 步骤融合: 碎片化 li 列表 → 单段散文, 利于向量召回.
+                # Fusion des étapes : liste de <li> fragmentés → un seul paragraphe (meilleur rappel vectoriel).
                 if rec.get("steps"):
                     rec["steps"] = [" ".join(rec["steps"])]
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -448,7 +449,7 @@ def build_recipes_jsonl(raw_dir: Path = RAW_DIR, out: Path = RECIPES_JSONL) -> P
                 n_multi_records += len(recs)
             else:
                 n_standard += 1
-    log.info("parse 完成: %d standard + %d multi-records (from %d pages); %d skipped",
+    log.info("parse terminé : %d standard + %d multi-records (depuis %d pages) ; %d sautés",
              n_standard, n_multi_records, n_multi_pages, len(unparsed))
     _emit_unparsed_md(unparsed)
     _emit_parsing_report(n_total, n_standard, n_multi_pages, n_multi_records, unparsed)
@@ -524,10 +525,10 @@ def load_recipes(path: Path = RECIPES_JSONL) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 3: chunk
+# Étape 3 : chunk
 # --------------------------------------------------------------------------- #
 def _split_steps(steps: list[str], max_chars: int) -> list[str]:
-    """按步骤边界聚合; 累计超 max_chars 则切新块."""
+    """Agrège par frontière d'étape ; ouvre un nouveau bloc si cumul > max_chars."""
     blocks: list[str] = []
     cur: list[str] = []
     size = 0
@@ -543,14 +544,14 @@ def _split_steps(steps: list[str], max_chars: int) -> list[str]:
 
 
 def chunk_recipes(recipes: list[dict], max_chars: int = 800, out: Path = CHUNKS_JSONL) -> list[Chunk]:
-    """字段切: 每 recipe 出 ingredients chunk + steps chunk(超阈值再切). 落盘并返回."""
+    """Découpage par champ : chaque recette → ingredients chunk + steps chunk(s). Persiste et renvoie."""
     out.parent.mkdir(parents=True, exist_ok=True)
     chunks: list[Chunk] = []
 
     for r in recipes:
         slug, name, url = r["slug"], r["name"], r["source_url"]
         rmeta = r.get("meta") or {}
-        # 仅透传可过滤/引用价值高的字段进 chunk metadata, 保持精简.
+        # Propagation restreinte aux champs utiles pour filtrage/citation, garde la metadata légère.
         extra = {k: rmeta[k] for k in ("servings", "difficulty") if rmeta.get(k)}
 
         def _meta(section_type: str, **kw) -> dict:
@@ -576,15 +577,15 @@ def chunk_recipes(recipes: list[dict], max_chars: int = 800, out: Path = CHUNKS_
     with out.open("w", encoding="utf-8") as f:
         for c in chunks:
             f.write(json.dumps(asdict(c), ensure_ascii=False) + "\n")
-    log.info("chunk 完成: %d chunks -> %s", len(chunks), out)
+    log.info("chunk terminé : %d chunks -> %s", len(chunks), out)
     return chunks
 
 
 # --------------------------------------------------------------------------- #
-# Orchestration — 主输出接口
+# Orchestration — interface principale
 # --------------------------------------------------------------------------- #
 def run(max_pages: int | None = None, delay: float = 1.0, max_chars: int = 800) -> list[Chunk]:
-    """编排 crawl -> parse -> chunk. 返回 List[Chunk] (下游混合检索 vector+BM25 消费)."""
+    """Enchaîne crawl -> parse -> chunk. Retourne List[Chunk] (consommé par le retrieval hybride vector+BM25)."""
     crawl(max_pages=max_pages, delay=delay)
     build_recipes_jsonl()
     recipes = load_recipes()
@@ -595,13 +596,13 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="P1 ingestion pipeline")
-    ap.add_argument("--max-pages", type=int, default=None, help="限制分类页分页数 (调试)")
-    ap.add_argument("--delay", type=float, default=1.0, help="请求间隔秒 (限速)")
-    ap.add_argument("--max-chars", type=int, default=800, help="steps chunk 切分阈值")
+    ap.add_argument("--max-pages", type=int, default=None, help="limite le nombre de pages de catégorie (debug)")
+    ap.add_argument("--delay", type=float, default=1.0, help="intervalle entre requêtes en secondes (politesse)")
+    ap.add_argument("--max-chars", type=int, default=800, help="seuil de découpe des chunks steps")
     args = ap.parse_args()
 
     result = run(max_pages=args.max_pages, delay=args.delay, max_chars=args.max_chars)
-    print(f"\n总计 {len(result)} chunks")
+    print(f"\nTotal {len(result)} chunks")
     for c in result[:3]:
         print(f"\n[{c.id}] {c.metadata['section_type']}")
         print(c.text[:200])

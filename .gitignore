@@ -6,3 +6,4 @@ data/raw/
 .claude/
 CLAUDE.md
 docs/
+p1_ingestion.zh.py
