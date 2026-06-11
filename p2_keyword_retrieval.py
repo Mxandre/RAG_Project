@@ -1,24 +1,24 @@
-"""TD-style keyword search engine adapted to the recipe RAG corpus.
+"""Moteur de recherche par mots-clés de style TD adapté au corpus RAG.
 
-The recipe corpus is stored as JSONL chunks:
+Le corpus de recettes est stocké en extraits JSONL :
 
     data/chunks.jsonl
 
-This module adapts the LO17 TD0-TD6 pipeline to those chunks:
+Ce module adapte le pipeline LO17 TD0-TD6 à ces extraits :
 
-- corpus preparation from JSONL chunks
-- tokenization and normalization
-- anti-dictionary / stopword filtering
-- lightweight French stemming
-- field-specific inverted indexes
-- reverse dictionary
-- spelling correction with prefix candidates + Levenshtein fallback
-- natural-language query processing
-- Boolean and ranked BM25 search
-- local precision/recall evaluation
+- préparation du corpus depuis les extraits JSONL
+- tokenisation et normalisation
+- filtrage par anti-dictionnaire / mots vides
+- racinisation française légère
+- index inversés par champ
+- dictionnaire inverse
+- correction orthographique par préfixe puis Levenshtein
+- analyse de requêtes en langage naturel
+- recherche booléenne et recherche BM25 classée
+- évaluation locale précision/rappel
 
-It is dependency-free on purpose, so it can run before the embedding part of
-the RAG system is ready.
+Le module reste volontairement sans dépendance externe afin de fonctionner
+avant la partie embeddings du système RAG.
 """
 
 from __future__ import annotations
@@ -56,24 +56,24 @@ STOPWORDS = {
     "quelle", "quelles", "quels", "qui", "quoi", "sa", "se", "selon",
     "ses", "si", "son", "sont", "sur", "ta", "te", "tes", "toi", "ton",
     "tout", "tres", "tu", "un", "une", "vos", "votre", "vous", "y",
-    # Query boilerplate.
+    # Termes fréquents dans les requêtes qui n'aident pas la recherche.
     "afficher", "chercher", "donner", "je", "liste", "recette", "recettes",
     "voudrais", "veux", "souhaite", "trouve", "trouver",
 }
 
 
-# Known mojibake seen in the current data when French UTF-8 text was decoded
-# through a Chinese code page. Using escapes keeps this source file ASCII-safe.
+# Artefacts d'encodage observés quand le français UTF-8 a été lu avec une page
+# de code chinoise. Les échappements gardent le fichier source stable.
 MOJIBAKE_REPLACEMENTS = {
-    "\u8305": "e",   # e acute in the scraped artifacts
-    "\u732b": "e",   # e grave
-    "\u951a": "e",   # e circumflex
-    "\u813f": "a",   # a grave
-    "\u8292": "a",   # a circumflex
-    "\u83bd": "c",   # c cedilla
-    "\u536f": "i",   # i circumflex
-    "\u4e48": "o",   # o circumflex
-    "\u6ca1": "u",   # u circumflex
+    "\u8305": "e",   # e accent aigu dans les artefacts scrapés
+    "\u732b": "e",   # e accent grave
+    "\u951a": "e",   # e accent circonflexe
+    "\u813f": "a",   # a accent grave
+    "\u8292": "a",   # a accent circonflexe
+    "\u83bd": "c",   # c cédille
+    "\u536f": "i",   # i accent circonflexe
+    "\u4e48": "o",   # o accent circonflexe
+    "\u6ca1": "u",   # u accent circonflexe
     "\u8259": "oe",
     "\u9205": " ",
     "\u6aab": " ",
@@ -169,11 +169,11 @@ def raw_tokens(text: str) -> list[str]:
 
 
 def stem_french(token: str) -> str:
-    """A compact French stemmer inspired by the TD Snowball step.
+    """Raciniseur français compact inspiré de l'étape Snowball du TD.
 
-    This is not a full linguistic lemmatizer. It is a local, dependency-free
-    normalization that groups common plural, gender, and verb variants well
-    enough for recipe search.
+    Ce n'est pas un lemmatiseur linguistique complet. C'est une normalisation
+    locale, sans dépendance, suffisante pour regrouper les variantes courantes
+    de pluriel, de genre et de verbes dans les recherches de recettes.
     """
     if NUMBER_RE.match(token) or len(token) <= 3:
         return token
@@ -238,11 +238,11 @@ def _field_text(doc: ChunkDocument, field_name: str) -> str:
                 doc.metadata.get("source_url", ""),
             ]
         )
-    raise ValueError(f"Unknown field: {field_name}")
+    raise ValueError(f"Champ inconnu : {field_name}")
 
 
 class KeywordSearchEngine:
-    """Complete TD-style keyword engine for recipe chunks."""
+    """Moteur complet de mots-clés pour les extraits de recettes."""
 
     def __init__(self, documents: list[ChunkDocument], *, auto_stopword_df: float = 0.85) -> None:
         self.documents = documents
@@ -419,9 +419,8 @@ class KeywordSearchEngine:
             if candidates:
                 break
 
-        # Robust fallback for prefix errors. TD4 asks to identify the weakness
-        # of prefix-only correction; this keeps the engine usable for typos at
-        # the beginning of the word.
+        # Repli robuste pour les erreurs en début de mot, là où une correction
+        # uniquement par préfixe échoue souvent.
         if not candidates:
             candidates = {
                 item
@@ -450,7 +449,7 @@ class KeywordSearchEngine:
         analysis = self.analyze_query(query)
         selected_field = field_name or analysis.field_filter or "all"
         if selected_field not in FIELDS:
-            raise ValueError(f"Unknown field: {selected_field}")
+            raise ValueError(f"Champ inconnu : {selected_field}")
 
         if mode == "boolean":
             candidate_ids = self.boolean_search(analysis, selected_field)
@@ -538,7 +537,7 @@ class KeywordSearchEngine:
             return self._eval_boolean_tree(node[1], field_name) | self._eval_boolean_tree(node[2], field_name)
         if kind == "NOT":
             return self.all_doc_ids - self._eval_boolean_tree(node[1], field_name)
-        raise ValueError(f"Unknown boolean node: {node}")
+        raise ValueError(f"Nœud booléen inconnu : {node}")
 
     def matching_chunks(self, terms: Iterable[str], *, field_name: str = "all") -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
@@ -566,17 +565,17 @@ class KeywordSearchEngine:
         )
 
     def _print_analysis(self, analysis: QueryAnalysis, field_name: str, mode: str) -> None:
-        print("Query analysis")
+        print("Analyse de la requête")
         print(f"  mode: {mode}")
-        print(f"  field: {field_name}")
-        print(f"  keywords: {analysis.keywords}")
-        print(f"  corrected: {analysis.corrected_keywords}")
+        print(f"  champ : {field_name}")
+        print(f"  mots-clés : {analysis.keywords}")
+        print(f"  corrigés : {analysis.corrected_keywords}")
         if analysis.corrections:
-            print(f"  corrections: {analysis.corrections}")
+            print(f"  corrections : {analysis.corrections}")
         if analysis.unknown_terms:
-            print(f"  unknown: {analysis.unknown_terms}")
+            print(f"  inconnus : {analysis.unknown_terms}")
         if analysis.boolean_expression:
-            print(f"  boolean: {analysis.boolean_expression}")
+            print(f"  booléen : {analysis.boolean_expression}")
 
     def to_json_dict(self) -> dict:
         return {
@@ -600,7 +599,7 @@ class KeywordSearchEngine:
     @classmethod
     def from_json_dict(cls, payload: dict) -> "KeywordSearchEngine":
         if payload.get("version") != INDEX_VERSION:
-            raise ValueError("Index version mismatch")
+            raise ValueError("Version d'index incompatible")
         engine = cls([ChunkDocument(**doc) for doc in payload["documents"]])
         engine.anti_dictionary = set(payload["anti_dictionary"])
         engine.lexicon = set(payload["lexicon"])
@@ -628,11 +627,11 @@ class KeywordSearchEngine:
 
 
 class KeywordSearchIndex(KeywordSearchEngine):
-    """Backward-compatible name from the first prototype."""
+    """Nom conservé pour compatibilité avec le premier prototype."""
 
 
 class BooleanQueryParser:
-    """Parser for TERM, AND, OR, NOT with simple precedence."""
+    """Parseur TERM, AND, OR, NOT avec précédence simple."""
 
     def __init__(self, tokens: list[str]) -> None:
         self.tokens = tokens
@@ -744,7 +743,7 @@ def evaluate(
     top_k_values: tuple[int, ...] = (1, 3, 5, 10),
     mode: str = "ranked",
 ) -> dict:
-    """Evaluate local recall/precision from a JSONL ground-truth file.
+    """Évalue localement rappel/précision depuis un fichier JSONL de vérité terrain.
 
     Each line can contain:
 
@@ -804,10 +803,10 @@ def analyze_query(
     chunks_path: Path = CHUNKS_JSONL,
     rebuild: bool = False,
 ) -> dict:
-    """Analyze a natural-language query and return a serializable structure.
+    """Analyse une requête en langage naturel et renvoie une structure sérialisable.
 
-    This replaces the separate TD5 wrapper and is useful for debugging the
-    keyword side of a future hybrid retriever.
+    Cette fonction remplace le wrapper TD5 séparé et aide à déboguer la partie
+    mots-clés du moteur hybride.
     """
     engine = load_or_build_index(chunks_path, index_path, rebuild=rebuild)
     return asdict(engine.analyze_query(query))
@@ -823,12 +822,11 @@ def keyword_search(
     chunks_path: Path = CHUNKS_JSONL,
     rebuild: bool = False,
 ) -> dict:
-    """Run keyword retrieval and return data ready to merge with embeddings.
+    """Lance la recherche par mots-clés et renvoie des données fusionnables avec les embeddings.
 
-    Output shape is intentionally close to what vector retrieval should return:
-    each result carries a stable id, score, content, metadata, and matched
-    keyword terms. Hybrid code can normalize scores and fuse this list with
-    vector-search results.
+    La forme de sortie reste proche de la recherche vectorielle : chaque
+    résultat contient un identifiant stable, un score, le contenu, les
+    métadonnées et les mots-clés trouvés.
     """
     engine = load_or_build_index(chunks_path, index_path, rebuild=rebuild)
     results, analysis = engine.search(
@@ -867,7 +865,7 @@ def _print_results(results: list[SearchResult]) -> None:
 
 
 def _interactive(engine: KeywordSearchEngine, *, mode: str, top_k: int) -> None:
-    print("Recipe keyword search. Empty query exits.")
+    print("Recherche de recettes par mots-clés. Une requête vide quitte le mode interactif.")
     while True:
         query = input("> ").strip()
         if not query:
@@ -880,25 +878,25 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="TD-style keyword search engine for recipe chunks.")
-    parser.add_argument("--chunks", type=Path, default=CHUNKS_JSONL, help="Path to chunks.jsonl")
-    parser.add_argument("--index", type=Path, default=KEYWORD_INDEX_JSON, help="Path to index JSON")
-    parser.add_argument("--query", type=str, default="", help="Search query")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of results")
+    parser = argparse.ArgumentParser(description="Moteur de recherche par mots-clés pour extraits de recettes.")
+    parser.add_argument("--chunks", type=Path, default=CHUNKS_JSONL, help="Chemin vers chunks.jsonl")
+    parser.add_argument("--index", type=Path, default=KEYWORD_INDEX_JSON, help="Chemin vers l'index JSON")
+    parser.add_argument("--query", type=str, default="", help="Requête de recherche")
+    parser.add_argument("--top-k", type=int, default=5, help="Nombre de résultats")
     parser.add_argument("--mode", choices=("ranked", "boolean", "hybrid"), default="ranked")
-    parser.add_argument("--field", choices=FIELDS, default=None, help="Restrict search to one field")
-    parser.add_argument("--rebuild", action="store_true", help="Rebuild index even if it exists")
-    parser.add_argument("--build-only", action="store_true", help="Build index and exit")
-    parser.add_argument("--explain", action="store_true", help="Print query analysis")
-    parser.add_argument("--interactive", action="store_true", help="Start terminal search UI")
-    parser.add_argument("--eval", type=Path, default=None, help="Evaluate with a JSONL ground-truth file")
+    parser.add_argument("--field", choices=FIELDS, default=None, help="Limiter la recherche à un champ")
+    parser.add_argument("--rebuild", action="store_true", help="Reconstruire l'index même s'il existe")
+    parser.add_argument("--build-only", action="store_true", help="Construire l'index puis quitter")
+    parser.add_argument("--explain", action="store_true", help="Afficher l'analyse de la requête")
+    parser.add_argument("--interactive", action="store_true", help="Lancer l'interface de recherche en terminal")
+    parser.add_argument("--eval", type=Path, default=None, help="Évaluer avec un fichier JSONL de vérité terrain")
     args = parser.parse_args()
 
     engine = load_or_build_index(args.chunks, args.index, rebuild=args.rebuild)
     print(
-        f"Index ready: {args.index} "
+        f"Index prêt : {args.index} "
         f"({len(engine.documents)} chunks, {len(engine.inverted_indexes['all'])} terms, "
-        f"{len(engine.anti_dictionary)} stop terms)"
+        f"{len(engine.anti_dictionary)} mots vides)"
     )
 
     if args.build_only:
@@ -919,7 +917,7 @@ def main() -> None:
         )
         _print_results(results)
         return
-    print('Pass --query, for example: --query "risotto champignons parmesan"')
+    print('Passez --query, par exemple : --query "risotto champignons parmesan"')
 
 
 if __name__ == "__main__":
