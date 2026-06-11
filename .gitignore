@@ -13,3 +13,4 @@ data/raw/
 CLAUDE.md
 docs/
 web_app.*.log
+p1_ingestion.zh.py
