@@ -32,6 +32,7 @@ import time
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -736,6 +737,20 @@ def load_or_build_index(
         return build_index(chunks_path, index_path)
 
 
+@lru_cache(maxsize=4)
+def _cached_load_or_build_index(
+    chunks_path: str,
+    index_path: str,
+    rebuild: bool,
+) -> KeywordSearchEngine:
+    return load_or_build_index(Path(chunks_path), Path(index_path), rebuild=rebuild)
+
+
+def clear_keyword_cache() -> None:
+    """Vide le cache en m茅moire de l'index mots-cl茅s."""
+    _cached_load_or_build_index.cache_clear()
+
+
 def evaluate(
     engine: KeywordSearchEngine,
     eval_path: Path,
@@ -828,7 +843,9 @@ def keyword_search(
     résultat contient un identifiant stable, un score, le contenu, les
     métadonnées et les mots-clés trouvés.
     """
-    engine = load_or_build_index(chunks_path, index_path, rebuild=rebuild)
+    if rebuild:
+        clear_keyword_cache()
+    engine = _cached_load_or_build_index(str(chunks_path), str(index_path), rebuild)
     results, analysis = engine.search(
         query,
         top_k=top_k,

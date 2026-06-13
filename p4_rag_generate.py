@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from p3_hybrid_retrieval import DEFAULT_CHROMA_DIR, DEFAULT_COLLECTION, DEFAULT_HF_CACHE_DIR, DEFAULT_MODEL
 from p3_hybrid_retrieval import repair_metadata, repair_mojibake
-from p3_hybrid_retrieval import hybrid_search, run_search
+from p3_hybrid_retrieval import run_search
 
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
@@ -219,27 +219,17 @@ def generate_answer(
         payload["retrieval"]["analysis"]["intent"] = intent
         return payload
 
-    if retrieval_mode == "hybrid":
-        retrieval = hybrid_search(
-            query,
-            top_k=retrieval_top_k,
-            keyword_k=keyword_k,
-            vector_k=vector_k,
-            persist_directory=persist_directory,
-            collection_name=collection_name,
-            model_name=embedding_model,
-            cache_dir=hf_cache_dir,
-        )
-    else:
-        retrieval = run_search(
-            query,
-            mode=retrieval_mode,
-            top_k=retrieval_top_k,
-            persist_directory=persist_directory,
-            collection_name=collection_name,
-            model_name=embedding_model,
-            cache_dir=hf_cache_dir,
-        )
+    retrieval = run_search(
+        query,
+        mode=retrieval_mode,
+        top_k=retrieval_top_k,
+        persist_directory=persist_directory,
+        collection_name=collection_name,
+        model_name=embedding_model,
+        cache_dir=hf_cache_dir,
+        keyword_k=keyword_k,
+        vector_k=vector_k,
+    )
     context = build_context(retrieval["results"], max_chars=context_max_chars)
 
     if not os.getenv("GEMINI_API_KEY"):

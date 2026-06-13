@@ -12,12 +12,14 @@ et les distances vectorielles ne sont pas sur la même échelle.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shutil
 import sys
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,12 @@ DEFAULT_COLLECTION = "recipes"
 DEFAULT_CHROMA_DIR = Path("chroma_db")
 DEFAULT_EVAL = Path("data") / "keyword_eval_queries.jsonl"
 DEFAULT_HF_CACHE_DIR = Path(".hf_cache")
+DEFAULT_SEARCH_CACHE_SIZE = 128
+DEFAULT_SEARCH_CACHE_TTL_SECONDS = 600
+DEFAULT_SEMANTIC_CACHE_THRESHOLD = 0.97
+
+
+_SEARCH_CACHE: OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]] = OrderedDict()
 
 
 def repair_mojibake(text: str) -> str:
@@ -46,6 +54,7 @@ def repair_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: repair_mojibake(value) if isinstance(value, str) else value for key, value in metadata.items()}
 
 
+@lru_cache(maxsize=4)
 def make_embeddings(model_name: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_HF_CACHE_DIR):
     """Crée la fonction d'embedding HuggingFace à la demande."""
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -61,6 +70,7 @@ def make_embeddings(model_name: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_H
     )
 
 
+@lru_cache(maxsize=8)
 def load_vectorstore(
     *,
     persist_directory: Path = DEFAULT_CHROMA_DIR,
@@ -77,6 +87,13 @@ def load_vectorstore(
     )
 
 
+def clear_retrieval_caches() -> None:
+    """Clear in-memory embedding, vectorstore, and query-result caches."""
+    _SEARCH_CACHE.clear()
+    make_embeddings.cache_clear()
+    load_vectorstore.cache_clear()
+
+
 def rebuild_vectorstore(
     *,
     jsonl_path: Path = CHUNKS_JSONL,
@@ -86,6 +103,7 @@ def rebuild_vectorstore(
     cache_dir: Path = DEFAULT_HF_CACHE_DIR,
     reset: bool = False,
 ):
+    clear_retrieval_caches()
     if reset and persist_directory.exists():
         shutil.rmtree(persist_directory)
 
@@ -334,11 +352,29 @@ def run_search(
     collection_name: str,
     model_name: str,
     cache_dir: Path = DEFAULT_HF_CACHE_DIR,
+    keyword_k: int = 20,
+    vector_k: int = 20,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
+    if use_cache:
+        cached = _get_cached_search(
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            model_name=model_name,
+            cache_dir=cache_dir,
+            keyword_k=keyword_k,
+            vector_k=vector_k,
+        )
+        if cached is not None:
+            return cached
+
     if mode == "keyword":
-        return keyword_search(query, top_k=top_k)
-    if mode == "vector":
-        return vector_search(
+        payload = keyword_search(query, top_k=top_k)
+    elif mode == "vector":
+        payload = vector_search(
             query,
             top_k=top_k,
             persist_directory=persist_directory,
@@ -346,16 +382,154 @@ def run_search(
             model_name=model_name,
             cache_dir=cache_dir,
         )
-    if mode == "hybrid":
-        return hybrid_search(
+    elif mode == "hybrid":
+        payload = hybrid_search(
             query,
             top_k=top_k,
             persist_directory=persist_directory,
             collection_name=collection_name,
             model_name=model_name,
             cache_dir=cache_dir,
+            keyword_k=keyword_k,
+            vector_k=vector_k,
         )
-    raise ValueError(f"Mode inconnu : {mode}")
+    else:
+        raise ValueError(f"Mode inconnu : {mode}")
+
+    if use_cache:
+        _store_cached_search(
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            model_name=model_name,
+            cache_dir=cache_dir,
+            keyword_k=keyword_k,
+            vector_k=vector_k,
+            payload=payload,
+        )
+    return payload
+
+
+def _get_cached_search(
+    *,
+    query: str,
+    mode: str,
+    top_k: int,
+    persist_directory: Path,
+    collection_name: str,
+    model_name: str,
+    cache_dir: Path,
+    keyword_k: int,
+    vector_k: int,
+) -> dict[str, Any] | None:
+    now = time.time()
+    key = _search_cache_key(
+        query,
+        mode,
+        top_k,
+        persist_directory,
+        collection_name,
+        model_name,
+        cache_dir,
+        keyword_k,
+        vector_k,
+    )
+    cached = _SEARCH_CACHE.get(key)
+    if cached and now - cached[0] <= DEFAULT_SEARCH_CACHE_TTL_SECONDS:
+        _SEARCH_CACHE.move_to_end(key)
+        payload = copy.deepcopy(cached[1])
+        payload.setdefault("analysis", {})["cache"] = {"hit": True, "type": "exact"}
+        return payload
+
+    normalized = _normalize_cache_query(query)
+    tokens = set(normalized.split())
+    if tokens:
+        for candidate_key, (created_at, candidate_payload) in reversed(_SEARCH_CACHE.items()):
+            if now - created_at > DEFAULT_SEARCH_CACHE_TTL_SECONDS:
+                continue
+            if candidate_key[0:8] != key[0:8]:
+                continue
+            similarity = _jaccard(tokens, set(str(candidate_key[8]).split()))
+            if similarity >= DEFAULT_SEMANTIC_CACHE_THRESHOLD:
+                _SEARCH_CACHE.move_to_end(candidate_key)
+                payload = copy.deepcopy(candidate_payload)
+                payload["query"] = query
+                payload.setdefault("analysis", {})["cache"] = {
+                    "hit": True,
+                    "type": "semantic",
+                    "matched_query": candidate_key[9],
+                    "similarity": similarity,
+                }
+                return payload
+    return None
+
+
+def _store_cached_search(
+    *,
+    query: str,
+    mode: str,
+    top_k: int,
+    persist_directory: Path,
+    collection_name: str,
+    model_name: str,
+    cache_dir: Path,
+    keyword_k: int,
+    vector_k: int,
+    payload: dict[str, Any],
+) -> None:
+    key = _search_cache_key(
+        query,
+        mode,
+        top_k,
+        persist_directory,
+        collection_name,
+        model_name,
+        cache_dir,
+        keyword_k,
+        vector_k,
+    )
+    _SEARCH_CACHE[key] = (time.time(), copy.deepcopy(payload))
+    _SEARCH_CACHE.move_to_end(key)
+    while len(_SEARCH_CACHE) > DEFAULT_SEARCH_CACHE_SIZE:
+        _SEARCH_CACHE.popitem(last=False)
+
+
+def _search_cache_key(
+    query: str,
+    mode: str,
+    top_k: int,
+    persist_directory: Path,
+    collection_name: str,
+    model_name: str,
+    cache_dir: Path,
+    keyword_k: int,
+    vector_k: int,
+) -> tuple[Any, ...]:
+    normalized = _normalize_cache_query(query)
+    return (
+        mode,
+        top_k,
+        str(Path(persist_directory)),
+        collection_name,
+        model_name,
+        str(Path(cache_dir)),
+        keyword_k,
+        vector_k,
+        normalized,
+        query,
+    )
+
+
+def _normalize_cache_query(query: str) -> str:
+    return " ".join(query.casefold().strip().split())
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
 
 
 def _is_relevant(result: dict[str, Any], row: dict[str, Any]) -> bool:
