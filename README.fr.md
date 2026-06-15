@@ -1,70 +1,229 @@
-# RAG_LO17 — Projet RAG sur recettes françaises
+# Projet RAG LO17 / AI31 sur des recettes françaises
 
-[中文](README.md) · [Français](README.fr.md)
+[中文](README.md) | [Français](README.fr.md)
 
-Projet de génération augmentée par récupération (RAG) construit sur un corpus de recettes françaises issues de [jemangefrancais.com](https://jemangefrancais.com). Ce dépôt ne contient pour l'instant que l'étape **P1 — Ingestion des données** : collecte, parsing, nettoyage et découpage en chunks. L'aval consomme l'interface stable `run() -> list[Chunk]` et alimente un récupérateur hybride (vecteur + BM25).
+Ce dépôt contient un système RAG (Retrieval Augmented Generation) appliqué à un corpus de recettes en français. Les données proviennent de [jemangefrancais.com](https://jemangefrancais.com). Le projet couvre la collecte des données, l'indexation, la recherche par mots-clés, la recherche vectorielle, la fusion hybride, la génération optionnelle avec Gemini, l'évaluation du RAG, la gestion des hallucinations et une application Streamlit.
 
-## Environnement et commandes
+Le projet répond aux consignes du fichier `Consignes pour le Projet.pdf` :
 
-Python 3.x requis. Le Python système est protégé par PEP-668 (externally-managed) ; l'installation doit passer par un venv local.
+- choix motivé d'un sujet et de données en français ;
+- code basé sur l'écosystème LangChain / Chroma / Gemini ;
+- évaluation du RAG et gestion des hallucinations ;
+- application avec Streamlit ;
+- code source reproductible.
 
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+## Données disponibles
 
-.venv/bin/python p1_ingestion.py                 # crawl complet de toutes les pages de catégorie
-.venv/bin/python p1_ingestion.py --max-pages 1   # debug : première page seulement
-.venv/bin/python p1_ingestion.py --delay 0.4 --max-chars 800
-```
+Les artefacts partagés sont inclus dans `data/` :
 
-Options :
-- `--max-pages` : limite de pagination (debug)
-- `--delay` : intervalle entre requêtes en secondes (politesse envers le site source)
-- `--max-chars` : seuil de découpage des étapes
+- `data/recipes.jsonl` : 112 recettes.
+- `data/chunks.jsonl` : 220 extraits indexables.
+- `data/keyword_eval_queries.jsonl` : 8 requêtes d'évaluation.
 
-## Architecture du pipeline
-
-Trois étapes, tous les artefacts dans `data/`, ré-exécutables et idempotents :
-
-```
-crawl  → data/raw/<slug>.html         (collecte d'URLs → téléchargement, skip si présent)
-parse  → data/recipes.jsonl           (parse_recipe route vers trois stratégies)
-chunk  → data/chunks.jsonl + List[Chunk]
-```
-
-`run()` orchestre les trois étapes. `data/raw/` est gitignored ; les deux fichiers `.jsonl` sont commités comme artefacts partagés.
-
-## Stratégie de parsing
-
-Le dispatcher `parse_recipe()` classe le HTML puis route vers la stratégie correspondante :
-
-- **multi** — pages contenant ≥2 sous-titres `<h3>` numérotés correspondant à des recettes indépendantes (ex. *Les délices du Risotto* avec 3 recettes distinctes). Chaque sous-recette est isolée et parsée séparément, émise comme enregistrement `slug#N`.
-- **standard** — pages mono-recette en disposition courante. Parcours en un seul passage dans l'ordre du document, avec les règles suivantes :
-  - h2/h3/h4/strong/b ainsi que les lignes `<p>` ancrées en début → marqueurs de section
-  - Sous-titres courts terminés par `:` (ex. `Le brownie :`) → étiquettes de sous-groupes d'ingrédients
-  - Les sous-titres courts contenant `recette` / `façon` basculent vers la section étapes (motif girolles)
-  - Marqueurs d'étapes étendus aux ordinaux numérotés `1ère étape` / `2ème étape` (motif cèpe)
-  - Une grappe de `<li>` sans en-tête de section explicite est rattachée par défaut aux ingrédients ; à l'intérieur d'`ingredients`, un `<p>` en prose sans tiret ouvre implicitement la section étapes
-- **skip** — absence de conteneur / aucun marqueur explicite ingrédient/préparation/étape / aucune section étapes récupérée → consigné dans `data/unparsed.md` avec la raison
-
-Les listes d'étapes sont fusionnées en un seul paragraphe avec `" ".join` avant persistance, ce qui améliore le rappel vectoriel sur les pages aux étapes très fragmentées (ex. *entremet* avec plus de 30 micro-`<li>`).
-
-Détails de couverture et statistiques dans [`docs/p1_parsing_report.md`](docs/p1_parsing_report.md) ; liste des fichiers non parsés dans [`data/unparsed.md`](data/unparsed.md).
-
-## Contrat de données
-
-`Chunk` est l'interface stable que P1 expose aux étages aval :
+Chaque extrait suit la forme suivante :
 
 ```python
-@dataclass
-class Chunk:
-    id: str          # f"{slug}::{section_type}", suffixé ::{idx} si plusieurs blocs d'étapes
-    text: str        # corps de récupération : indexé par BM25 et embeddé pour vecteurs
-    metadata: dict   # {recipe_name, source_url, section_type, [servings, difficulty]}
+{
+    "id": "...",
+    "text": "...",
+    "metadata": {
+        "recipe_name": "...",
+        "source_url": "...",
+        "section_type": "ingredients | steps",
+        "servings": "..."
+    }
+}
 ```
 
-Découpage par champ, pas par fenêtre fixe : une recette produit un chunk `ingredients` + un chunk `steps` (redécoupé sur frontières d'étapes si `max_chars` est dépassé, avec `chunk_index`). Le champ `section_type` permet aux étages aval de pondérer différemment (ingrédients favorisent les correspondances BM25 par mot-clé ; étapes favorisent la sémantique vectorielle).
+## Structure du dépôt
 
-`recipes.jsonl` conserve en plus un dictionnaire `meta` (`prep_time` / `cook_time` / `rest_time` / `difficulty` / `servings`), exclu du corps de récupération.
+```text
+RAG_Project/
+├── data_process.py              # Construction de la base vectorielle Chroma
+├── p1_ingestion.py              # Crawl, parsing, nettoyage, chunking
+├── p2_keyword_retrieval.py      # Recherche mots-clés / BM25 / booléen / analyse de requête
+├── p3_hybrid_retrieval.py       # Recherche vectorielle + fusion RRF + évaluation retrieval
+├── p4_rag_generate.py           # Génération Gemini, intention, sécurité
+├── p5_rag_evaluate.py           # Faithfulness, correctness, sécurité
+├── streamlit_app.py             # Application Streamlit en mode chat
+├── web_app.py                   # Interface web locale avec la bibliothèque standard
+├── requirements.txt             # Dépendances Python
+└── data/
+    ├── recipes.jsonl
+    ├── chunks.jsonl
+    └── keyword_eval_queries.jsonl
+```
+
+## Installation
+
+Il est recommandé d'utiliser un environnement virtuel.
+
+Windows PowerShell :
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Linux / macOS :
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+## Lancer l'application Streamlit
+
+Windows :
+
+```powershell
+.\.venv\Scripts\streamlit.exe run streamlit_app.py
+```
+
+Linux / macOS :
+
+```bash
+.venv/bin/streamlit run streamlit_app.py
+```
+
+Puis ouvrir :
+
+```text
+http://127.0.0.1:8501
+```
+
+L'application propose trois modes :
+
+- `keyword` : recherche BM25 sur index inversé.
+- `vector` : embeddings `BAAI/bge-m3` avec Chroma.
+- `hybrid` : fusion RRF entre les résultats BM25 et vectoriels.
+
+## Génération Gemini optionnelle
+
+La recherche locale fonctionne sans clé API. Pour générer une réponse avec Gemini, définir :
+
+```bash
+GEMINI_API_KEY=your_key_here
+```
+
+ou créer un fichier local `.env` :
+
+```text
+GEMINI_API_KEY=your_key_here
+```
+
+La génération est implémentée dans `p4_rag_generate.py`. Les règles de génération visent à limiter les hallucinations :
+
+- réponse fondée uniquement sur le contexte retrouvé ;
+- refus d'inventer des ingrédients, quantités, étapes ou sources ;
+- indication explicite lorsque le contexte ne suffit pas ;
+- détection des requêtes adversariales ;
+- neutralisation des instructions hostiles présentes dans les documents retrouvés.
+
+## Utilisation en ligne de commande
+
+Recherche par mots-clés :
+
+```powershell
+.\.venv\Scripts\python.exe p2_keyword_retrieval.py --query "risotto champignons parmesan" --top-k 5
+```
+
+Recherche hybride :
+
+```powershell
+.\.venv\Scripts\python.exe p3_hybrid_retrieval.py --query "recette ratatouille" --mode hybrid --top-k 5
+```
+
+Génération RAG :
+
+```powershell
+.\.venv\Scripts\python.exe p4_rag_generate.py --query "Je voudrais faire une ratatouille." --retrieval-mode hybrid --top-k 5
+```
+
+Interface web locale sans Streamlit :
+
+```powershell
+.\.venv\Scripts\python.exe web_app.py --host 127.0.0.1 --port 8000
+```
+
+Puis ouvrir :
+
+```text
+http://127.0.0.1:8000
+```
+
+## Évaluation
+
+Évaluation de la recherche par mots-clés :
+
+```powershell
+.\.venv\Scripts\python.exe p2_keyword_retrieval.py --eval data\keyword_eval_queries.jsonl --mode ranked
+```
+
+Comparaison des modes `keyword`, `vector` et `hybrid` :
+
+```powershell
+.\.venv\Scripts\python.exe p3_hybrid_retrieval.py --eval data\keyword_eval_queries.jsonl --compare
+```
+
+Évaluation RAG et sécurité :
+
+```powershell
+.\.venv\Scripts\python.exe p5_rag_evaluate.py --mode hybrid --top-k 5
+.\.venv\Scripts\python.exe p5_rag_evaluate.py --security-only
+```
+
+Résultats vérifiés localement :
+
+| Mode | Recall@1 | Precision@1 | MRR |
+|---|---:|---:|---:|
+| keyword | 1.000 | 1.000 | 1.000 |
+| vector | 0.875 | 0.875 | 0.938 |
+| hybrid | 1.000 | 1.000 | 1.000 |
+
+Évaluation sécurité :
+
+```text
+score = 1.0
+```
+
+Les tests couvrent les prompt injections, les tentatives de fuite du prompt, les jailbreaks et la sanitisation du contexte hostile.
+
+## Reproductibilité
+
+Points à vérifier lors d'une installation sur une nouvelle machine :
+
+- `chroma_db/` doit exister ou être reconstruit.
+- `.hf_cache/` doit contenir le modèle `BAAI/bge-m3` si le chargement local est utilisé.
+- Si le cache HuggingFace est absent, il faut préparer le modèle avec un accès réseau.
+- La génération Gemini nécessite `GEMINI_API_KEY`.
+
+Construire la base Chroma :
+
+```powershell
+.\.venv\Scripts\python.exe p3_hybrid_retrieval.py --build-vectorstore --jsonl data\chunks.jsonl
+```
+
+## Correspondance avec les consignes
+
+| Consigne | Réalisation |
+|---|---|
+| Sujet et données en français | Corpus de recettes françaises dans `data/recipes.jsonl` |
+| RAG | `p2_keyword_retrieval.py`, `p3_hybrid_retrieval.py`, `p4_rag_generate.py` |
+| Évaluation du RAG | `p5_rag_evaluate.py`, `data/keyword_eval_queries.jsonl` |
+| Gestion des hallucinations | prompt contraint, faithfulness, refus de génération non fondée |
+| Application Streamlit | `streamlit_app.py` |
+| Code source reproductible | `requirements.txt`, scripts CLI, données prétraitées |
+
+## Rendus à préparer pour le cours
+
+Les consignes demandent aussi :
+
+- un rapport de 8 pages maximum avec le pourcentage de contribution ;
+- une présentation et une démo ;
+- un déploiement éventuel en bonus.
+
+Ces éléments doivent être préparés séparément pour le rendu final.
 
 ## Licence
 

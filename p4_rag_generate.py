@@ -98,8 +98,8 @@ RECIPE_KEYWORDS = {
     "plat", "plats", "poisson", "porc", "poulet", "preparation", "préparation",
     "recette", "recettes", "repas", "riz", "sauce", "viande",
     "bean", "beans", "beef", "broccoli", "carrot", "chicken", "cook", "cooking",
-    "dish", "food", "ingredient", "ingredients", "meal", "meat", "recipe", "vegetable",
-    "vegetables", "zucchini",
+    "dish", "food", "ingredient", "ingredients", "meal", "meat", "recipe", "tomato",
+    "tomatoes", "tomate", "tomates", "vegetable", "vegetables", "zucchini",
     "白菜", "胡萝卜", "西兰花", "西葫芦", "豆角", "菜", "菜谱", "营养", "食材", "肉菜",
 }
 
@@ -316,19 +316,25 @@ def _generate_with_gemini(
     temperature: float,
     system_instruction: str,
 ) -> str:
-    from google import genai
-    from google.genai import types
+    from langchain_google_genai import ChatGoogleGenerativeAI
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response = client.models.generate_content(
+    llm = ChatGoogleGenerativeAI(
         model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=temperature,
-        ),
+        google_api_key=os.getenv("GEMINI_API_KEY"),
+        temperature=temperature,
     )
-    return response.text or ""
+    response = llm.invoke(
+        [
+            ("system", system_instruction),
+            ("human", prompt),
+        ]
+    )
+    content = response.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(part) for part in content)
+    return str(content or "")
 
 
 def _print_sources(results: list[dict[str, Any]]) -> None:
