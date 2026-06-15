@@ -40,6 +40,13 @@ DEFAULT_SEMANTIC_CACHE_THRESHOLD = 0.97
 _SEARCH_CACHE: OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]] = OrderedDict()
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def repair_mojibake(text: str) -> str:
     """Repair common UTF-8-as-Latin-1 mojibake such as 'Ã©' -> 'é'."""
     if not isinstance(text, str) or "Ã" not in text:
@@ -56,17 +63,27 @@ def repair_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 @lru_cache(maxsize=4)
 def make_embeddings(model_name: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_HF_CACHE_DIR):
-    """Crée la fonction d'embedding HuggingFace à la demande."""
+    """Crée la fonction d'embedding HuggingFace à la demande.
+
+    By default, a fresh checkout may download the embedding model into
+    ``.hf_cache``. Set ``RAG_HF_LOCAL_FILES_ONLY=1`` (or HuggingFace offline
+    env vars) to force fully local loading.
+    """
     from langchain_huggingface import HuggingFaceEmbeddings
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(cache_dir.resolve()))
     os.environ.setdefault("TRANSFORMERS_CACHE", str((cache_dir / "transformers").resolve()))
+    local_files_only = (
+        _env_flag("RAG_HF_LOCAL_FILES_ONLY")
+        or _env_flag("HF_HUB_OFFLINE")
+        or _env_flag("TRANSFORMERS_OFFLINE")
+    )
     return HuggingFaceEmbeddings(
         model=model_name,
         cache_folder=str(cache_dir),
-        model_kwargs={"local_files_only": True},
+        model_kwargs={"local_files_only": local_files_only},
     )
 
 
@@ -80,11 +97,20 @@ def load_vectorstore(
 ):
     from langchain_chroma import Chroma
 
-    return Chroma(
+    embeddings = make_embeddings(model_name, cache_dir)
+    vectorstore = Chroma(
         persist_directory=str(persist_directory),
-        embedding_function=make_embeddings(model_name, cache_dir),
+        embedding_function=embeddings,
         collection_name=collection_name,
     )
+    if _vectorstore_count(vectorstore) == 0 and Path(CHUNKS_JSONL).exists():
+        vectorstore = build_chroma_vectorstore(
+            jsonl_path=CHUNKS_JSONL,
+            embeddings=embeddings,
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+        )
+    return vectorstore
 
 
 def clear_retrieval_caches() -> None:
@@ -92,6 +118,13 @@ def clear_retrieval_caches() -> None:
     _SEARCH_CACHE.clear()
     make_embeddings.cache_clear()
     load_vectorstore.cache_clear()
+
+
+def _vectorstore_count(vectorstore: Any) -> int:
+    try:
+        return int(vectorstore._collection.count())
+    except Exception:
+        return 0
 
 
 def rebuild_vectorstore(

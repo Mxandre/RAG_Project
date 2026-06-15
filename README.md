@@ -95,8 +95,8 @@ http://127.0.0.1:8501
 应用支持三种检索模式：
 
 - `keyword`：BM25 / 关键词倒排索引检索。
-- `vector`：`BAAI/bge-m3` embeddings + Chroma 向量检索。
-- `hybrid`：关键词检索和向量检索通过 RRF 融合。
+- `vector`：`BAAI/bge-m3` embeddings + Chroma 向量检索。首次运行时如果本地没有模型，会自动下载到 `.hf_cache/`。
+- `hybrid`：关键词检索和向量检索通过 RRF 融合，这是推荐的默认模式。
 
 ## 可选 Gemini 生成
 
@@ -190,12 +190,18 @@ score = 1.0
 
 ## 复现注意事项
 
-- `chroma_db/` 和 `.hf_cache/` 如果不存在，需要先构建或下载模型。
-- 当前向量模型为 `BAAI/bge-m3`。
-- `p3_hybrid_retrieval.py` 中 embeddings 默认使用本地缓存加载；如果新机器没有缓存，需要先联网准备 HuggingFace 模型。
+- 在有网络的新机器上，首次使用 `hybrid` 或 `vector` 模式时会自动下载 `BAAI/bge-m3` 到 `.hf_cache/`。
+- 如果 `chroma_db/` 不存在，或 Chroma collection 为空，会自动从 `data/chunks.jsonl` 构建向量库。
+- 后续运行会复用 `.hf_cache/` 和 `chroma_db/`。
 - Gemini 生成只在设置 `GEMINI_API_KEY` 后可用。
 
-构建 Chroma 向量库：
+如果需要强制完全离线运行，请先准备好 `.hf_cache/` 和 `chroma_db/`，然后设置：
+
+```powershell
+$env:RAG_HF_LOCAL_FILES_ONLY="1"
+```
+
+也可以手动构建或重建 Chroma 向量库：
 
 ```powershell
 .\.venv\Scripts\python.exe p3_hybrid_retrieval.py --build-vectorstore --jsonl data\chunks.jsonl

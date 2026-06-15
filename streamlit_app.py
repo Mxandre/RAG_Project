@@ -26,6 +26,12 @@ from p4_rag_generate import DEFAULT_GEMINI_MODEL, classify_query_intent, generat
 
 
 APP_TITLE = "Assistant RAG de recettes"
+HF_OFFLINE_HINTS = (
+    "huggingface.co",
+    "cached files",
+    "local_files_only",
+    "offline mode",
+)
 
 
 def _format_retrieval_answer(query: str, results: list[dict[str, Any]]) -> str:
@@ -67,49 +73,103 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_missing_hf_cache_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(hint in message for hint in HF_OFFLINE_HINTS)
+
+
+def _fallback_notice(mode: str) -> str:
+    return (
+        f"Le mode {mode} utilise le modele HuggingFace local BAAI/bge-m3, "
+        "mais il n'est pas encore present dans le cache. La recherche a donc "
+        "ete relancee en mode mots-cles."
+    )
+
+
 def _run_rag(query: str, *, mode: str, top_k: int, generate: bool) -> dict[str, Any]:
     if not generate and not classify_query_intent(query).get("is_recipe_related"):
         response = non_recipe_response(query)
         response["mode"] = mode
         return response
 
+    active_mode = mode
+    fallback_warning = None
+
     if generate:
-        generated = generate_answer(
-            query,
-            retrieval_top_k=top_k,
-            retrieval_mode=mode,
-            llm_model=DEFAULT_GEMINI_MODEL,
-            persist_directory=DEFAULT_CHROMA_DIR,
-            collection_name=DEFAULT_COLLECTION,
-            embedding_model=DEFAULT_MODEL,
-            hf_cache_dir=DEFAULT_HF_CACHE_DIR,
-        )
+        try:
+            generated = generate_answer(
+                query,
+                retrieval_top_k=top_k,
+                retrieval_mode=active_mode,
+                llm_model=DEFAULT_GEMINI_MODEL,
+                persist_directory=DEFAULT_CHROMA_DIR,
+                collection_name=DEFAULT_COLLECTION,
+                embedding_model=DEFAULT_MODEL,
+                hf_cache_dir=DEFAULT_HF_CACHE_DIR,
+            )
+        except Exception as exc:
+            if active_mode == "keyword" or not _is_missing_hf_cache_error(exc):
+                raise
+            fallback_warning = _fallback_notice(active_mode)
+            active_mode = "keyword"
+            generated = generate_answer(
+                query,
+                retrieval_top_k=top_k,
+                retrieval_mode=active_mode,
+                llm_model=DEFAULT_GEMINI_MODEL,
+                persist_directory=DEFAULT_CHROMA_DIR,
+                collection_name=DEFAULT_COLLECTION,
+                embedding_model=DEFAULT_MODEL,
+                hf_cache_dir=DEFAULT_HF_CACHE_DIR,
+            )
         retrieval = generated.get("retrieval", {"results": []})
         results = [_compact_result(item) for item in retrieval.get("results", [])]
+        analysis = retrieval.get("analysis", {})
+        if fallback_warning:
+            analysis["fallback"] = {"from": mode, "to": active_mode, "reason": fallback_warning}
         return {
             "query": query,
-            "mode": mode,
+            "mode": active_mode,
             "answer": generated.get("answer") or _format_retrieval_answer(query, results),
-            "error": generated.get("error"),
-            "analysis": retrieval.get("analysis", {}),
+            "error": generated.get("error") or fallback_warning,
+            "analysis": analysis,
             "results": results,
         }
 
-    retrieval = run_search(
-        query,
-        mode=mode,
-        top_k=top_k,
-        persist_directory=DEFAULT_CHROMA_DIR,
-        collection_name=DEFAULT_COLLECTION,
-        model_name=DEFAULT_MODEL,
-        cache_dir=DEFAULT_HF_CACHE_DIR,
-    )
+    try:
+        retrieval = run_search(
+            query,
+            mode=active_mode,
+            top_k=top_k,
+            persist_directory=DEFAULT_CHROMA_DIR,
+            collection_name=DEFAULT_COLLECTION,
+            model_name=DEFAULT_MODEL,
+            cache_dir=DEFAULT_HF_CACHE_DIR,
+        )
+    except Exception as exc:
+        if active_mode == "keyword" or not _is_missing_hf_cache_error(exc):
+            raise
+        fallback_warning = _fallback_notice(active_mode)
+        active_mode = "keyword"
+        retrieval = run_search(
+            query,
+            mode=active_mode,
+            top_k=top_k,
+            persist_directory=DEFAULT_CHROMA_DIR,
+            collection_name=DEFAULT_COLLECTION,
+            model_name=DEFAULT_MODEL,
+            cache_dir=DEFAULT_HF_CACHE_DIR,
+        )
     results = [_compact_result(item) for item in retrieval.get("results", [])]
+    analysis = retrieval.get("analysis", {})
+    if fallback_warning:
+        analysis["fallback"] = {"from": mode, "to": active_mode, "reason": fallback_warning}
     return {
         "query": query,
-        "mode": mode,
+        "mode": active_mode,
         "answer": _format_retrieval_answer(query, results),
-        "analysis": retrieval.get("analysis", {}),
+        "error": fallback_warning,
+        "analysis": analysis,
         "results": results,
     }
 

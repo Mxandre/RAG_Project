@@ -95,8 +95,8 @@ http://127.0.0.1:8501
 L'application propose trois modes :
 
 - `keyword` : recherche BM25 sur index inversé.
-- `vector` : embeddings `BAAI/bge-m3` avec Chroma.
-- `hybrid` : fusion RRF entre les résultats BM25 et vectoriels.
+- `vector` : embeddings `BAAI/bge-m3` avec Chroma. Au premier lancement, le modèle est téléchargé dans `.hf_cache/` si nécessaire.
+- `hybrid` : fusion RRF entre les résultats BM25 et vectoriels. C'est le mode par défaut recommandé.
 
 ## Génération Gemini optionnelle
 
@@ -191,14 +191,20 @@ Les tests couvrent les prompt injections, les tentatives de fuite du prompt, les
 
 ## Reproductibilité
 
-Points à vérifier lors d'une installation sur une nouvelle machine :
+Sur une nouvelle machine avec accès Internet :
 
-- `chroma_db/` doit exister ou être reconstruit.
-- `.hf_cache/` doit contenir le modèle `BAAI/bge-m3` si le chargement local est utilisé.
-- Si le cache HuggingFace est absent, il faut préparer le modèle avec un accès réseau.
+- le premier lancement en mode `hybrid` ou `vector` télécharge automatiquement le modèle `BAAI/bge-m3` dans `.hf_cache/` ;
+- si `chroma_db/` n'existe pas ou si la collection est vide, la base Chroma est construite automatiquement depuis `data/chunks.jsonl` ;
+- les lancements suivants réutilisent `.hf_cache/` et `chroma_db/`.
 - La génération Gemini nécessite `GEMINI_API_KEY`.
 
-Construire la base Chroma :
+Pour forcer un mode entièrement local, préparer d'abord `.hf_cache/` et `chroma_db/`, puis définir :
+
+```powershell
+$env:RAG_HF_LOCAL_FILES_ONLY="1"
+```
+
+Construire ou reconstruire manuellement la base Chroma reste possible :
 
 ```powershell
 .\.venv\Scripts\python.exe p3_hybrid_retrieval.py --build-vectorstore --jsonl data\chunks.jsonl
