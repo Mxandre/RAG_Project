@@ -41,7 +41,7 @@ DATA_DIR = Path("data")
 CHUNKS_JSONL = DATA_DIR / "chunks.jsonl"
 KEYWORD_INDEX_JSON = DATA_DIR / "keyword_index.json"
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 FIELDS = ("all", "name", "ingredients", "steps", "metadata")
 
 
@@ -59,7 +59,7 @@ STOPWORDS = {
     "tout", "tres", "tu", "un", "une", "vos", "votre", "vous", "y",
     # Termes fréquents dans les requêtes qui n'aident pas la recherche.
     "afficher", "chercher", "donner", "je", "liste", "recette", "recettes",
-    "voudrais", "veux", "souhaite", "trouve", "trouver",
+    "voudrais", "veux", "souhaite", "trouve", "trouver", "faut",
 }
 
 
@@ -227,9 +227,13 @@ def _field_text(doc: ChunkDocument, field_name: str) -> str:
     if field_name == "name":
         return doc.metadata.get("recipe_name", "")
     if field_name == "ingredients":
-        return doc.text if section == "ingredients" else ""
+        if section == "ingredients":
+            return " ".join([doc.metadata.get("recipe_name", ""), doc.text])
+        return ""
     if field_name == "steps":
-        return doc.text if section == "steps" else ""
+        if section == "steps":
+            return " ".join([doc.metadata.get("recipe_name", ""), doc.text])
+        return ""
     if field_name == "metadata":
         return " ".join(
             [

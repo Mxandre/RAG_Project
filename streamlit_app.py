@@ -74,16 +74,40 @@ def _run_rag(query: str, *, mode: str, top_k: int, generate: bool) -> dict[str, 
         return response
 
     if generate:
-        generated = generate_answer(
-            query,
-            retrieval_top_k=top_k,
-            retrieval_mode=mode,
-            llm_model=DEFAULT_GEMINI_MODEL,
-            persist_directory=DEFAULT_CHROMA_DIR,
-            collection_name=DEFAULT_COLLECTION,
-            embedding_model=DEFAULT_MODEL,
-            hf_cache_dir=DEFAULT_HF_CACHE_DIR,
-        )
+        try:
+            generated = generate_answer(
+                query,
+                retrieval_top_k=top_k,
+                retrieval_mode=mode,
+                llm_model=DEFAULT_GEMINI_MODEL,
+                persist_directory=DEFAULT_CHROMA_DIR,
+                collection_name=DEFAULT_COLLECTION,
+                embedding_model=DEFAULT_MODEL,
+                hf_cache_dir=DEFAULT_HF_CACHE_DIR,
+            )
+        except Exception as exc:
+            retrieval = run_search(
+                query,
+                mode=mode,
+                top_k=top_k,
+                persist_directory=DEFAULT_CHROMA_DIR,
+                collection_name=DEFAULT_COLLECTION,
+                model_name=DEFAULT_MODEL,
+                cache_dir=DEFAULT_HF_CACHE_DIR,
+            )
+            results = [_compact_result(item) for item in retrieval.get("results", [])]
+            return {
+                "query": query,
+                "mode": mode,
+                "answer": _format_retrieval_answer(query, results),
+                "error": (
+                    "Gemini n'est pas disponible pour cette requete ; "
+                    "affichage des meilleurs resultats de recherche a la place. "
+                    f"Detail: {_short_error(exc)}"
+                ),
+                "analysis": retrieval.get("analysis", {}),
+                "results": results,
+            }
         retrieval = generated.get("retrieval", {"results": []})
         results = [_compact_result(item) for item in retrieval.get("results", [])]
         return {
@@ -112,6 +136,13 @@ def _run_rag(query: str, *, mode: str, top_k: int, generate: bool) -> dict[str, 
         "analysis": retrieval.get("analysis", {}),
         "results": results,
     }
+
+
+def _short_error(exc: Exception, *, max_chars: int = 220) -> str:
+    message = " ".join(str(exc).split())
+    if len(message) <= max_chars:
+        return message
+    return message[: max_chars - 3].rstrip() + "..."
 
 
 def _html_escape(value: str) -> str:
@@ -156,6 +187,13 @@ def _source_card_html(index: int, result: dict[str, Any]) -> str:
         f'<div class="chips">{chips}</div>'
         "</div>"
     )
+
+
+def _source_expander_label(index: int, result: dict[str, Any]) -> str:
+    metadata = result.get("metadata", {})
+    recipe = metadata.get("recipe_name", "Recette inconnue")
+    score = float(result.get("score", 0.0) or 0.0)
+    return f"Voir le chunk complet #{index} - {recipe} ({score:.4f})"
 
 
 def _apply_style() -> None:
@@ -468,6 +506,7 @@ def _apply_style() -> None:
 
 
 def _init_state() -> None:
+    st.session_state.setdefault("history", [])
     st.session_state.setdefault("last_payload", None)
     st.session_state.setdefault("last_query", "")
     st.session_state.setdefault("pending_query", "")
@@ -496,6 +535,7 @@ def main() -> None:
         generate = st.checkbox("Generer une reponse avec Gemini", value=True)
         st.divider()
         if st.button("Effacer le resultat", use_container_width=True):
+            st.session_state.history = []
             st.session_state.last_payload = None
             st.session_state.last_query = ""
             st.session_state.pending_query = ""
@@ -514,12 +554,40 @@ def main() -> None:
 
     st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
 
+    history = st.session_state.history
     payload = st.session_state.last_payload
     pending_query = st.session_state.pending_query
+    if history:
+        for turn in history:
+            st.markdown(_message_html("user", turn.get("query", "")), unsafe_allow_html=True)
+            turn_payload = turn.get("payload", {})
+            if turn_payload.get("error"):
+                st.warning(turn_payload["error"])
+            st.markdown(
+                _message_html("assistant", turn_payload.get("answer") or "Aucune reponse."),
+                unsafe_allow_html=True,
+            )
+
+        latest_payload = history[-1].get("payload", {})
+        sources_tab, analysis_tab = st.tabs(["Sources de la derniere reponse", "Analyse technique"])
+        with sources_tab:
+            results = latest_payload.get("results", [])
+            if results:
+                for index, result in enumerate(results, start=1):
+                    st.markdown(_source_card_html(index, result), unsafe_allow_html=True)
+                    full_text = result.get("text") or result.get("snippet") or ""
+                    if full_text:
+                        with st.expander(_source_expander_label(index, result)):
+                            st.write(full_text)
+            else:
+                st.info("Aucune source retrouvee.")
+        with analysis_tab:
+            st.json(latest_payload.get("analysis", {}))
+
     if pending_query:
         st.markdown(_message_html("user", pending_query), unsafe_allow_html=True)
         st.markdown(_message_html("assistant", "Recherche en cours..."), unsafe_allow_html=True)
-    elif payload:
+    elif payload and not history:
         if payload.get("error"):
             st.warning(payload["error"])
 
@@ -535,6 +603,10 @@ def main() -> None:
             if results:
                 for index, result in enumerate(results, start=1):
                     st.markdown(_source_card_html(index, result), unsafe_allow_html=True)
+                    full_text = result.get("text") or result.get("snippet") or ""
+                    if full_text:
+                        with st.expander(_source_expander_label(index, result)):
+                            st.write(full_text)
             else:
                 st.info("Aucune source retrouvee.")
         with analysis_tab:
@@ -596,6 +668,12 @@ def main() -> None:
             }
         finally:
             st.session_state.last_query = active_query
+            st.session_state.history.append(
+                {
+                    "query": active_query,
+                    "payload": st.session_state.last_payload,
+                }
+            )
             st.session_state.pending_query = ""
             st.session_state.pending_options = None
             st.rerun()
