@@ -1,12 +1,12 @@
-"""Recherche hybride : index de mots-clés + recherche vectorielle.
+"""Recherche hybride : index par mots-clés et recherche vectorielle.
 
 Ce script combine :
 
 - la recherche par mots-clés de ``p2_keyword_retrieval.py``
 - la recherche vectorielle Chroma construite par ``data_process.py``
 
-La fusion utilise Reciprocal Rank Fusion (RRF), robuste lorsque les scores BM25
-et les distances vectorielles ne sont pas sur la même échelle.
+La fusion utilise Reciprocal Rank Fusion, car les scores de type BM25 et les
+distances vectorielles ne sont pas sur la même échelle.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ _SEARCH_CACHE: OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]] = Orde
 
 
 def repair_mojibake(text: str) -> str:
-    """Repair common UTF-8-as-Latin-1 mojibake such as 'Ã©' -> 'é'."""
+    """Répare les erreurs courantes de décodage UTF-8 lu comme Latin-1."""
     if not isinstance(text, str) or "Ã" not in text:
         return text
     try:
@@ -88,7 +88,7 @@ def load_vectorstore(
 
 
 def clear_retrieval_caches() -> None:
-    """Clear in-memory embedding, vectorstore, and query-result caches."""
+    """Vide les caches en mémoire des embeddings, de Chroma et des requêtes."""
     _SEARCH_CACHE.clear()
     make_embeddings.cache_clear()
     load_vectorstore.cache_clear()
@@ -231,9 +231,9 @@ def hybrid_search(
             fused[result_id][f"{source}_score"] = result.get("score", 0.0)
             fused[result_id][f"{source}_norm_score"] = norms.get(result_id, 0.0)
 
-            # Les résultats mots-clés viennent du JSONL courant et gardent le
-            # texte le plus propre. Les résultats vectoriels complètent le rang
-            # et les entrées absentes, sans écraser ce texte.
+            # Les résultats mots-clés viennent du JSONL courant et ont souvent
+            # le texte le plus propre. Les résultats vectoriels complètent les
+            # entrées absentes sans écraser ce texte.
             if source == "vector" and "keyword" not in fused[result_id]["sources"]:
                 fused[result_id]["text"] = result["text"]
                 fused[result_id]["snippet"] = result["snippet"]
@@ -433,7 +433,7 @@ def run_search(
             vector_k=vector_k,
         )
     else:
-        raise ValueError(f"Mode inconnu : {mode}")
+        raise ValueError(f"Unknown mode: {mode}")
 
     if use_cache:
         _store_cached_search(
@@ -621,12 +621,12 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="Recherche hybride par mots-clés et embeddings.")
+    parser = argparse.ArgumentParser(description="Hybrid retrieval with keyword and embedding search.")
     parser.add_argument("--query", type=str, default="")
     parser.add_argument("--mode", choices=("keyword", "vector", "hybrid"), default="hybrid")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--eval", type=Path, default=None)
-    parser.add_argument("--compare", action="store_true", help="Évaluer les modes mots-clés, vectoriel et hybride")
+    parser.add_argument("--compare", action="store_true", help="Evaluate keyword, vector, and hybrid modes")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--hf-cache-dir", type=Path, default=DEFAULT_HF_CACHE_DIR)
     parser.add_argument("--chroma-dir", type=Path, default=DEFAULT_CHROMA_DIR)
@@ -645,7 +645,7 @@ def main() -> None:
             cache_dir=args.hf_cache_dir,
             reset=args.reset_vectorstore,
         )
-        print(f"Base vectorielle prête : {args.chroma_dir} / {args.collection}")
+        print(f"Vector store ready: {args.chroma_dir} / {args.collection}")
 
     if args.eval:
         if args.compare:
@@ -692,7 +692,7 @@ def main() -> None:
         _print_search(payload)
         return
 
-    print('Passez --query "..." ou --eval data/keyword_eval_queries.jsonl')
+    print('Pass --query "..." or --eval data/keyword_eval_queries.jsonl')
 
 
 if __name__ == "__main__":

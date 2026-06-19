@@ -1,12 +1,12 @@
 """Petite interface web de type chat pour le projet RAG de recettes.
 
-Run:
+Lancement :
 
     python web_app.py --host 127.0.0.1 --port 8000
 
-L'application utilise uniquement la bibliothèque standard Python pour servir
-HTTP. Elle appelle directement les modules de recherche et de génération afin
-de conserver les textes UTF-8 sous forme de chaînes Unicode Python.
+L'application utilise seulement la bibliothèque standard pour servir HTTP. Elle
+appelle directement les modules de recherche et de génération afin de garder le
+texte UTF-8 sous forme de chaînes Python normales.
 """
 
 from __future__ import annotations
@@ -26,22 +26,22 @@ from p3_hybrid_retrieval import repair_metadata, repair_mojibake, run_search
 from p4_rag_generate import DEFAULT_GEMINI_MODEL, classify_query_intent, generate_answer, non_recipe_response
 
 
-APP_TITLE = "Assistant RAG de recettes"
+APP_TITLE = "Recipe RAG assistant"
 
 
 def retrieval_answer(query: str, results: list[dict[str, Any]]) -> str:
-    """Construit une réponse courte sans génération par LLM externe."""
+    """Construit une réponse courte sans appeler de LLM externe."""
     if not results:
-        return "Aucun extrait de recette correspondant n'a été trouvé."
+        return "No matching recipe chunks were found."
 
     lines = [
-        f"J'ai trouvé {len(results)} extrait(s) pertinent(s) pour : {query}",
+        f"Found {len(results)} relevant chunk(s) for: {query}",
         "",
-        "Meilleures sources :",
+        "Top sources:",
     ]
     for index, result in enumerate(results, start=1):
         metadata = repair_metadata(result.get("metadata", {}))
-        recipe = metadata.get("recipe_name", "Recette inconnue")
+        recipe = metadata.get("recipe_name", "Unknown recipe")
         section = metadata.get("section_type", "unknown")
         source = ", ".join(result.get("sources", [result.get("retriever", "")]))
         snippet = repair_mojibake(result.get("snippet") or result.get("text", ""))
@@ -75,11 +75,11 @@ def compact_result(result: dict[str, Any]) -> dict[str, Any]:
 def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
     query = str(payload.get("query", "")).strip()
     if not query:
-        raise ValueError("La question est obligatoire.")
+        raise ValueError("A question is required.")
 
     mode = payload.get("mode") or "hybrid"
     if mode not in {"keyword", "vector", "hybrid"}:
-        raise ValueError("Le mode doit être keyword, vector ou hybrid.")
+        raise ValueError("Mode must be keyword, vector, or hybrid.")
 
     top_k = int(payload.get("top_k") or 6)
     top_k = max(1, min(top_k, 20))
@@ -122,7 +122,7 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 "query": query,
                 "mode": mode,
                 "answer": retrieval_answer(query, results),
-                "error": f"La génération a échoué ; affichage des résultats de recherche à la place. {exc}",
+                "error": f"Generation failed. Showing retrieval results instead. {exc}",
                 "analysis": retrieval.get("analysis", {}),
                 "results": results,
             }
@@ -167,12 +167,12 @@ class RagChatHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send_json({"ok": True})
             return
-        self.send_error(HTTPStatus.NOT_FOUND, "Introuvable")
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         path = urlparse(self.path).path
         if path != "/api/chat":
-            self.send_error(HTTPStatus.NOT_FOUND, "Introuvable")
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
         try:
             payload = self._read_json()
@@ -207,11 +207,11 @@ class RagChatHandler(BaseHTTPRequestHandler):
 
 
 INDEX_HTML = r"""<!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Assistant RAG de recettes</title>
+  <title>Recipe RAG assistant</title>
   <style>
     :root {
       color-scheme: light;
@@ -710,62 +710,62 @@ INDEX_HTML = r"""<!doctype html>
       <div class="mark">
         <div class="mark-icon">R</div>
         <div>
-          <h1 class="mark-title">Assistant RAG<br />de recettes</h1>
-          <div class="mark-kicker">Atelier culinaire</div>
+          <h1 class="mark-title">Recipe RAG<br />assistant</h1>
+          <div class="mark-kicker">Recipe search</div>
         </div>
       </div>
 
       <div class="controls">
         <div class="field">
-          <div class="field-label">Moteur de recherche</div>
+          <div class="field-label">Search engine</div>
           <input id="mode" type="hidden" value="hybrid" />
-          <div class="segments" role="group" aria-label="Mode de recherche">
-            <button class="segment active" type="button" data-mode="hybrid">Hybride <span></span></button>
-            <button class="segment" type="button" data-mode="keyword">Mots-clés <span></span></button>
-            <button class="segment" type="button" data-mode="vector">Vectoriel <span></span></button>
+          <div class="segments" role="group" aria-label="Search mode">
+            <button class="segment active" type="button" data-mode="hybrid">Hybrid <span></span></button>
+            <button class="segment" type="button" data-mode="keyword">Keyword <span></span></button>
+            <button class="segment" type="button" data-mode="vector">Vector <span></span></button>
           </div>
         </div>
 
         <div class="field">
-          <label class="field-label" for="topK">Nombre de résultats</label>
+          <label class="field-label" for="topK">Number of results</label>
           <div class="number-row">
-            <button class="step" type="button" data-step="-1" aria-label="Diminuer">-</button>
+            <button class="step" type="button" data-step="-1" aria-label="Decrease">-</button>
             <input id="topK" type="number" min="1" max="20" value="6" />
-            <button class="step" type="button" data-step="1" aria-label="Augmenter">+</button>
+            <button class="step" type="button" data-step="1" aria-label="Increase">+</button>
           </div>
         </div>
 
         <label class="toggle">
           <input id="generate" type="checkbox" checked />
           <span>
-            <strong>Réponse générée</strong>
-            <small>Utilise le LLM si la clé API est configurée, sinon affiche les meilleurs passages.</small>
+            <strong>Generated answer</strong>
+            <small>Uses the LLM when the API key is configured. Otherwise, it shows the best passages.</small>
           </span>
         </label>
       </div>
 
       <div class="note">
-        Les modules Python existants restent aux commandes. Cette interface ne change que l'expérience de consultation.
+        The existing Python modules still do the work. This page only changes how the results are shown.
       </div>
     </aside>
 
     <main class="stage">
       <header class="topbar">
-        <div class="eyebrow">Corpus recettes · LO17</div>
-        <h1>Explorez les ingrédients, les étapes et les sources avec une interface taillée pour lire vite.</h1>
-        <p>Posez une question naturelle : le système combine recherche lexicale, vectorielle et génération optionnelle.</p>
+        <div class="eyebrow">Recipe corpus / LO17</div>
+        <h1>Search ingredients, steps, and source chunks from one page.</h1>
+        <p>Ask a normal question. The system can use keyword search, vector search, and optional generation.</p>
       </header>
 
       <section id="messages" class="messages">
         <div class="message assistant">
           <div class="avatar">R</div>
           <div class="welcome">
-            <h2>Que voulez-vous cuisiner ?</h2>
-            <p>Demandez une recette, une liste d'ingrédients, une méthode de préparation ou une idée à partir de ce que vous avez sous la main.</p>
+            <h2>What do you want to cook?</h2>
+            <p>Ask for a recipe, ingredients, preparation steps, or an idea based on what you have.</p>
             <div class="prompts">
-              <button class="prompt" type="button">Quels ingrédients pour un risotto aux champignons ?</button>
-              <button class="prompt" type="button">Je voudrais faire une ratatouille.</button>
-              <button class="prompt" type="button">Propose une recette avec du poulet et des légumes.</button>
+              <button class="prompt" type="button">What ingredients do I need for mushroom risotto?</button>
+              <button class="prompt" type="button">I want to make ratatouille.</button>
+              <button class="prompt" type="button">Suggest a recipe with chicken and vegetables.</button>
             </div>
           </div>
         </div>
@@ -773,24 +773,24 @@ INDEX_HTML = r"""<!doctype html>
 
       <section class="composer">
         <form id="chatForm">
-          <textarea id="query" placeholder="Posez une question..." rows="1"></textarea>
-          <button id="send" class="send" type="submit" title="Envoyer" aria-label="Envoyer">&uarr;</button>
+          <textarea id="query" placeholder="Ask a question..." rows="1"></textarea>
+          <button id="send" class="send" type="submit" title="Send" aria-label="Send">&uarr;</button>
         </form>
         <div id="error" class="error"></div>
       </section>
     </main>
 
-    <aside class="inspector" aria-label="Dossier de recherche">
+    <aside class="inspector" aria-label="Search details">
       <div>
-        <h2>Dossier de recherche</h2>
-        <p id="inspectorSummary">Aucune requête lancée pour le moment.</p>
+        <h2>Search details</h2>
+        <p id="inspectorSummary">No query has run yet.</p>
         <div class="status-grid">
-          <div class="stat"><small>Mode</small><strong id="statMode">Hybride</strong></div>
+          <div class="stat"><small>Mode</small><strong id="statMode">Hybrid</strong></div>
           <div class="stat"><small>Top K</small><strong id="statTopK">6</strong></div>
         </div>
       </div>
       <div id="sourceList" class="source-list">
-        <div class="empty-state">Les sources retrouvées apparaîtront ici après votre première question.</div>
+        <div class="empty-state">Retrieved sources will appear here after the first question.</div>
       </div>
     </aside>
   </div>
@@ -807,7 +807,7 @@ INDEX_HTML = r"""<!doctype html>
     const inspectorSummary = document.querySelector("#inspectorSummary");
     const statMode = document.querySelector("#statMode");
     const statTopK = document.querySelector("#statTopK");
-    const modeLabels = { hybrid: "Hybride", keyword: "Mots-clés", vector: "Vectoriel" };
+    const modeLabels = { hybrid: "Hybrid", keyword: "Keyword", vector: "Vector" };
 
     document.querySelectorAll(".segment").forEach((button) => {
       button.addEventListener("click", () => {
@@ -871,7 +871,7 @@ INDEX_HTML = r"""<!doctype html>
         source.className = "source";
         const title = document.createElement("div");
         title.className = "source-title";
-        title.innerHTML = `<span>${index + 1}. ${escapeHtml(metadata.recipe_name || "Recette inconnue")}</span><span>${Number(item.score || 0).toFixed(3)}</span>`;
+        title.innerHTML = `<span>${index + 1}. ${escapeHtml(metadata.recipe_name || "Unknown recipe")}</span><span>${Number(item.score || 0).toFixed(3)}</span>`;
         const body = document.createElement("div");
         body.textContent = item.snippet || item.text || "";
         const chips = document.createElement("div");
@@ -893,13 +893,13 @@ INDEX_HTML = r"""<!doctype html>
     function updateInspector(payload) {
       const results = payload.results || [];
       inspectorSummary.textContent = results.length
-        ? `${results.length} source(s) retrouvée(s) pour "${payload.query || ""}".`
-        : `Aucune source affichable pour "${payload.query || ""}".`;
+        ? `${results.length} source(s) found for "${payload.query || ""}".`
+        : `No displayable source for "${payload.query || ""}".`;
       sourceList.innerHTML = "";
       if (!results.length) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
-        empty.textContent = "La réponse ne contient pas encore de passage source.";
+        empty.textContent = "The answer does not include a source passage yet.";
         sourceList.appendChild(empty);
         return;
       }
@@ -908,9 +908,9 @@ INDEX_HTML = r"""<!doctype html>
         const card = document.createElement("div");
         card.className = "mini-source";
         const title = document.createElement("strong");
-        title.textContent = `${index + 1}. ${metadata.recipe_name || "Recette inconnue"}`;
+        title.textContent = `${index + 1}. ${metadata.recipe_name || "Unknown recipe"}`;
         const meta = document.createElement("p");
-        meta.textContent = `${metadata.section_type || "section"} · score ${Number(item.score || 0).toFixed(3)}`;
+        meta.textContent = `${metadata.section_type || "section"} / score ${Number(item.score || 0).toFixed(3)}`;
         card.appendChild(title);
         card.appendChild(meta);
         sourceList.appendChild(card);
@@ -949,7 +949,7 @@ INDEX_HTML = r"""<!doctype html>
       query.value = "";
       resizeQuery();
       send.disabled = true;
-      addMessage("assistant", "Recherche en cours...");
+      addMessage("assistant", "Searching...");
       const loading = messages.lastElementChild;
       try {
         const response = await fetch("/api/chat", {
@@ -966,15 +966,15 @@ INDEX_HTML = r"""<!doctype html>
         loading.remove();
         updateInspector(payload);
         if (!response.ok || payload.error) {
-          addMessage("assistant", payload.answer || payload.error || "La requête a échoué.", payload.results || []);
+          addMessage("assistant", payload.answer || payload.error || "The query failed.", payload.results || []);
           if (payload.error) error.textContent = payload.error;
         } else {
-          addMessage("assistant", payload.answer || "Aucune réponse.", payload.results || []);
+          addMessage("assistant", payload.answer || "No answer.", payload.results || []);
         }
       } catch (err) {
         loading.remove();
         error.textContent = err.message || String(err);
-        addMessage("assistant", "Le serveur local a renvoyé une erreur.");
+        addMessage("assistant", "The local server returned an error.");
       } finally {
         send.disabled = false;
         query.focus();
@@ -992,23 +992,23 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description=f"Lancer {APP_TITLE}.")
+    parser = argparse.ArgumentParser(description=f"Run {APP_TITLE}.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
     project_dir = Path(__file__).resolve().parent
-    # Les modules existants utilisent des chemins relatifs vers data/chroma.
-    # On stabilise le répertoire de travail quel que soit le point de lancement.
+    # Les modules existants utilisent des chemins relatifs vers data et Chroma.
+    # On fixe donc le dossier de travail, quel que soit le point de lancement.
     import os
 
     os.chdir(project_dir)
     server = ThreadingHTTPServer((args.host, args.port), RagChatHandler)
-    print(f"{APP_TITLE} disponible sur http://{args.host}:{args.port}")
+    print(f"{APP_TITLE} available at http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nArrêt du serveur.")
+        print("\nServer stopped.")
     finally:
         server.server_close()
 

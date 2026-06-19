@@ -1,6 +1,6 @@
-"""Streamlit chat interface for the French recipe RAG project.
+"""Interface Streamlit de type chat pour le projet RAG de recettes.
 
-Run:
+Lancement :
 
     streamlit run streamlit_app.py
 """
@@ -25,22 +25,22 @@ from p3_hybrid_retrieval import (
 from p4_rag_generate import DEFAULT_GEMINI_MODEL, classify_query_intent, generate_answer, non_recipe_response
 
 
-APP_TITLE = "Assistant RAG de recettes"
+APP_TITLE = "Recipe RAG assistant"
 
 
 def _format_retrieval_answer(query: str, results: list[dict[str, Any]]) -> str:
     if not results:
-        return "Aucun extrait de recette correspondant n'a ete trouve."
+        return "No matching recipe chunks were found."
 
     lines = [
-        f"J'ai trouve {len(results)} extrait(s) pertinent(s) pour : {query}",
+        f"Found {len(results)} relevant chunk(s) for: {query}",
         "",
-        "Meilleures sources :",
+        "Top sources:",
     ]
     for index, result in enumerate(results, start=1):
         metadata = repair_metadata(result.get("metadata", {}))
-        recipe = metadata.get("recipe_name", "Recette inconnue")
-        section = metadata.get("section_type", "section inconnue")
+        recipe = metadata.get("recipe_name", "Unknown recipe")
+        section = metadata.get("section_type", "unknown section")
         sources = ", ".join(result.get("sources", [result.get("retriever", "")]))
         snippet = repair_mojibake(result.get("snippet") or result.get("text", ""))
         snippet = " ".join(snippet.split())
@@ -101,8 +101,8 @@ def _run_rag(query: str, *, mode: str, top_k: int, generate: bool) -> dict[str, 
                 "mode": mode,
                 "answer": _format_retrieval_answer(query, results),
                 "error": (
-                    "Gemini n'est pas disponible pour cette requete ; "
-                    "affichage des meilleurs resultats de recherche a la place. "
+                    "Gemini is not available for this query. "
+                    "Showing the best retrieval results instead. "
                     f"Detail: {_short_error(exc)}"
                 ),
                 "analysis": retrieval.get("analysis", {}),
@@ -171,8 +171,8 @@ def _message_html(role: str, text: str) -> str:
 
 def _source_card_html(index: int, result: dict[str, Any]) -> str:
     metadata = result.get("metadata", {})
-    recipe = metadata.get("recipe_name", "Recette inconnue")
-    section = metadata.get("section_type", "section inconnue")
+    recipe = metadata.get("recipe_name", "Unknown recipe")
+    section = metadata.get("section_type", "unknown section")
     snippet = result.get("snippet") or result.get("text") or ""
     score = float(result.get("score", 0.0) or 0.0)
     values = [section, *(result.get("sources") or []), *(result.get("matched_terms") or [])]
@@ -191,9 +191,9 @@ def _source_card_html(index: int, result: dict[str, Any]) -> str:
 
 def _source_expander_label(index: int, result: dict[str, Any]) -> str:
     metadata = result.get("metadata", {})
-    recipe = metadata.get("recipe_name", "Recette inconnue")
+    recipe = metadata.get("recipe_name", "Unknown recipe")
     score = float(result.get("score", 0.0) or 0.0)
-    return f"Voir le chunk complet #{index} - {recipe} ({score:.4f})"
+    return f"Open full chunk #{index} - {recipe} ({score:.4f})"
 
 
 def _apply_style() -> None:
@@ -523,18 +523,18 @@ def main() -> None:
 
     with st.sidebar:
         st.title(APP_TITLE)
-        st.caption("Projet LO17 - RAG culinaire francais")
+        st.caption("LO17 recipe RAG project")
         st.divider()
         mode = st.selectbox(
-            "Mode de recherche",
+            "Search mode",
             options=("hybrid", "keyword", "vector"),
             index=0,
-            format_func={"hybrid": "Hybride", "keyword": "Mots-cles", "vector": "Vectorielle"}.get,
+            format_func={"hybrid": "Hybrid", "keyword": "Keyword", "vector": "Vector"}.get,
         )
-        top_k = st.slider("Nombre de resultats", min_value=1, max_value=20, value=5)
-        generate = st.checkbox("Generer une reponse avec Gemini", value=True)
+        top_k = st.slider("Number of results", min_value=1, max_value=20, value=5)
+        generate = st.checkbox("Generate an answer with Gemini", value=True)
         st.divider()
-        if st.button("Effacer le resultat", use_container_width=True):
+        if st.button("Clear results", use_container_width=True):
             st.session_state.history = []
             st.session_state.last_payload = None
             st.session_state.last_query = ""
@@ -545,8 +545,8 @@ def main() -> None:
     st.markdown(
         """
         <div class="rag-header">
-          <h1>Interrogez votre corpus de recettes</h1>
-          <p>Index de mots-cles et recherche vectorielle servis par les modules Python existants.</p>
+          <h1>Search the recipe corpus</h1>
+          <p>Keyword and vector search backed by the existing Python modules.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -564,12 +564,12 @@ def main() -> None:
             if turn_payload.get("error"):
                 st.warning(turn_payload["error"])
             st.markdown(
-                _message_html("assistant", turn_payload.get("answer") or "Aucune reponse."),
+                _message_html("assistant", turn_payload.get("answer") or "No answer."),
                 unsafe_allow_html=True,
             )
 
         latest_payload = history[-1].get("payload", {})
-        sources_tab, analysis_tab = st.tabs(["Sources de la derniere reponse", "Analyse technique"])
+        sources_tab, analysis_tab = st.tabs(["Latest sources", "Search details"])
         with sources_tab:
             results = latest_payload.get("results", [])
             if results:
@@ -580,7 +580,7 @@ def main() -> None:
                         with st.expander(_source_expander_label(index, result)):
                             st.write(full_text)
             else:
-                st.info("Aucune source retrouvee.")
+                st.info("No sources found.")
         with analysis_tab:
             st.json(latest_payload.get("analysis", {}))
 
@@ -593,11 +593,11 @@ def main() -> None:
 
         st.markdown(_message_html("user", st.session_state.last_query), unsafe_allow_html=True)
         st.markdown(
-            _message_html("assistant", payload.get("answer") or "Aucune reponse."),
+            _message_html("assistant", payload.get("answer") or "No answer."),
             unsafe_allow_html=True,
         )
 
-        sources_tab, analysis_tab = st.tabs(["Sources", "Analyse technique"])
+        sources_tab, analysis_tab = st.tabs(["Sources", "Search details"])
         with sources_tab:
             results = payload.get("results", [])
             if results:
@@ -608,7 +608,7 @@ def main() -> None:
                         with st.expander(_source_expander_label(index, result)):
                             st.write(full_text)
             else:
-                st.info("Aucune source retrouvee.")
+                st.info("No sources found.")
         with analysis_tab:
             st.json(payload.get("analysis", {}))
     else:
@@ -616,7 +616,7 @@ def main() -> None:
             """
             <div class="chat-empty">
               <div class="avatar">R</div>
-              <div class="bubble">Bonjour, je suis pret a chercher dans le corpus. Ecrivez votre question dans la barre de discussion en bas de la page.</div>
+              <div class="bubble">Ready to search the corpus. Type a recipe question in the chat box below.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -625,13 +625,13 @@ def main() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
     prompt = st.chat_input(
-        "Posez une question sur les ingredients, les etapes ou les recettes...",
+        "Ask about ingredients, steps, or recipes...",
         disabled=bool(st.session_state.pending_query),
     )
     if prompt:
         active_query = prompt.strip()
         if not active_query:
-            st.warning("Veuillez saisir une question.")
+            st.warning("Please enter a question.")
         else:
             st.session_state.last_payload = None
             st.session_state.last_query = active_query
@@ -661,7 +661,7 @@ def main() -> None:
             st.session_state.last_payload = {
                 "query": active_query,
                 "mode": options["mode"],
-                "answer": f"La requete a echoue : {exc}",
+                "answer": f"The query failed: {exc}",
                 "error": None,
                 "analysis": {},
                 "results": [],

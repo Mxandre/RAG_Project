@@ -1,24 +1,24 @@
-"""Moteur de recherche par mots-clés de style TD adapté au corpus RAG.
+"""Module de recherche par mots-clés adapté des TD pour le corpus RAG.
 
-Le corpus de recettes est stocké en extraits JSONL :
+Le corpus de recettes est stocké sous forme de fragments JSONL :
 
     data/chunks.jsonl
 
-Ce module adapte le pipeline LO17 TD0-TD6 à ces extraits :
+Le module reprend les étapes principales du pipeline LO17 :
 
-- préparation du corpus depuis les extraits JSONL
+- chargement des fragments JSONL
 - tokenisation et normalisation
-- filtrage par anti-dictionnaire / mots vides
+- filtrage des mots vides
 - racinisation française légère
 - index inversés par champ
-- dictionnaire inverse
-- correction orthographique par préfixe puis Levenshtein
-- analyse de requêtes en langage naturel
-- recherche booléenne et recherche BM25 classée
-- évaluation locale précision/rappel
+- dictionnaires de termes par document
+- correction de requête par préfixe puis distance de Levenshtein
+- analyse de requêtes simples en langage naturel
+- recherche booléenne et recherche classée de type BM25
+- évaluation locale de la précision et du rappel
 
-Le module reste volontairement sans dépendance externe afin de fonctionner
-avant la partie embeddings du système RAG.
+L'implémentation ne dépend d'aucun paquet externe afin de fonctionner même
+avant la préparation de la partie embeddings du pipeline.
 """
 
 from __future__ import annotations
@@ -57,24 +57,24 @@ STOPWORDS = {
     "quelle", "quelles", "quels", "qui", "quoi", "sa", "se", "selon",
     "ses", "si", "son", "sont", "sur", "ta", "te", "tes", "toi", "ton",
     "tout", "tres", "tu", "un", "une", "vos", "votre", "vous", "y",
-    # Termes fréquents dans les requêtes qui n'aident pas la recherche.
+    # Mots fréquents dans les requêtes, peu utiles pour le classement.
     "afficher", "chercher", "donner", "je", "liste", "recette", "recettes",
     "voudrais", "veux", "souhaite", "trouve", "trouver", "faut",
 }
 
 
-# Artefacts d'encodage observés quand le français UTF-8 a été lu avec une page
-# de code chinoise. Les échappements gardent le fichier source stable.
+# Artefacts d'encodage observés quand du français UTF-8 est lu avec une
+# mauvaise page de code. Les échappements gardent le fichier stable.
 MOJIBAKE_REPLACEMENTS = {
-    "\u8305": "e",   # e accent aigu dans les artefacts scrapés
-    "\u732b": "e",   # e accent grave
-    "\u951a": "e",   # e accent circonflexe
-    "\u813f": "a",   # a accent grave
-    "\u8292": "a",   # a accent circonflexe
+    "\u8305": "e",   # e avec accent aigu dans certains textes récupérés
+    "\u732b": "e",   # e avec accent grave
+    "\u951a": "e",   # e avec accent circonflexe
+    "\u813f": "a",   # a avec accent grave
+    "\u8292": "a",   # a avec accent circonflexe
     "\u83bd": "c",   # c cédille
-    "\u536f": "i",   # i accent circonflexe
-    "\u4e48": "o",   # o accent circonflexe
-    "\u6ca1": "u",   # u accent circonflexe
+    "\u536f": "i",   # i avec accent circonflexe
+    "\u4e48": "o",   # o avec accent circonflexe
+    "\u6ca1": "u",   # u avec accent circonflexe
     "\u8259": "oe",
     "\u9205": " ",
     "\u6aab": " ",
@@ -146,7 +146,7 @@ class SearchResult:
 
 
 def normalize_text(text: str) -> str:
-    """Lowercase, deaccent, normalize apostrophes, and repair known artifacts."""
+    """Met en minuscules, retire les accents et répare les artefacts connus."""
     for bad, good in MOJIBAKE_REPLACEMENTS.items():
         text = text.replace(bad, good)
     text = unicodedata.normalize("NFKD", text)
@@ -170,11 +170,11 @@ def raw_tokens(text: str) -> list[str]:
 
 
 def stem_french(token: str) -> str:
-    """Raciniseur français compact inspiré de l'étape Snowball du TD.
+    """Raciniseur français léger inspiré de l'étape Snowball du TD.
 
-    Ce n'est pas un lemmatiseur linguistique complet. C'est une normalisation
-    locale, sans dépendance, suffisante pour regrouper les variantes courantes
-    de pluriel, de genre et de verbes dans les recherches de recettes.
+    Ce n'est pas un lemmatiseur complet. Il sert seulement à regrouper les
+    variantes courantes de pluriel, de genre et de verbes pour la recherche de
+    recettes.
     """
     if NUMBER_RE.match(token) or len(token) <= 3:
         return token
@@ -247,7 +247,7 @@ def _field_text(doc: ChunkDocument, field_name: str) -> str:
 
 
 class KeywordSearchEngine:
-    """Moteur complet de mots-clés pour les extraits de recettes."""
+    """Moteur de recherche par mots-clés pour les fragments de recettes."""
 
     def __init__(self, documents: list[ChunkDocument], *, auto_stopword_df: float = 0.85) -> None:
         self.documents = documents
@@ -413,7 +413,7 @@ class KeywordSearchEngine:
         prefix_max: int = 5,
         max_distance: int = 2,
     ) -> str | None:
-        """Correct a query term using TD4 prefix candidates and Levenshtein."""
+        """Corrige un terme avec les candidats par préfixe du TD4 et Levenshtein."""
         if NUMBER_RE.match(term) or term in self.lexicon:
             return term
 
@@ -424,8 +424,8 @@ class KeywordSearchEngine:
             if candidates:
                 break
 
-        # Repli robuste pour les erreurs en début de mot, là où une correction
-        # uniquement par préfixe échoue souvent.
+        # La recherche par préfixe rate les fautes placées au début du mot.
+        # On utilise donc un repli borné par la longueur avant Levenshtein.
         if not candidates:
             candidates = {
                 item
@@ -632,11 +632,11 @@ class KeywordSearchEngine:
 
 
 class KeywordSearchIndex(KeywordSearchEngine):
-    """Nom conservé pour compatibilité avec le premier prototype."""
+    """Alias conservé pour rester compatible avec le premier prototype."""
 
 
 class BooleanQueryParser:
-    """Parseur TERM, AND, OR, NOT avec précédence simple."""
+    """Parseur TERM, AND, OR et NOT avec des règles de priorité simples."""
 
     def __init__(self, tokens: list[str]) -> None:
         self.tokens = tokens
@@ -751,7 +751,7 @@ def _cached_load_or_build_index(
 
 
 def clear_keyword_cache() -> None:
-    """Vide le cache en m茅moire de l'index mots-cl茅s."""
+    """Vide le cache en mémoire de l'index par mots-clés."""
     _cached_load_or_build_index.cache_clear()
 
 
@@ -762,7 +762,7 @@ def evaluate(
     top_k_values: tuple[int, ...] = (1, 3, 5, 10),
     mode: str = "ranked",
 ) -> dict:
-    """Évalue localement rappel/précision depuis un fichier JSONL de vérité terrain.
+    """Évalue le rappel et la précision depuis un fichier JSONL local.
 
     Each line can contain:
 
@@ -822,10 +822,10 @@ def analyze_query(
     chunks_path: Path = CHUNKS_JSONL,
     rebuild: bool = False,
 ) -> dict:
-    """Analyse une requête en langage naturel et renvoie une structure sérialisable.
+    """Analyse une requête en langage naturel et renvoie une structure JSON.
 
-    Cette fonction remplace le wrapper TD5 séparé et aide à déboguer la partie
-    mots-clés du moteur hybride.
+    Cette fonction remplace le wrapper TD5 séparé et facilite l'inspection de
+    la partie mots-clés du moteur hybride.
     """
     engine = load_or_build_index(chunks_path, index_path, rebuild=rebuild)
     return asdict(engine.analyze_query(query))
@@ -841,11 +841,10 @@ def keyword_search(
     chunks_path: Path = CHUNKS_JSONL,
     rebuild: bool = False,
 ) -> dict:
-    """Lance la recherche par mots-clés et renvoie des données fusionnables avec les embeddings.
+    """Lance la recherche par mots-clés et renvoie des données fusionnables.
 
-    La forme de sortie reste proche de la recherche vectorielle : chaque
-    résultat contient un identifiant stable, un score, le contenu, les
-    métadonnées et les mots-clés trouvés.
+    La sortie garde la même forme que la recherche vectorielle : identifiant,
+    score, texte, métadonnées et termes trouvés.
     """
     if rebuild:
         clear_keyword_cache()
