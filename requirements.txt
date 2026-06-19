@@ -1,9 +1,14 @@
 requests>=2.32
 beautifulsoup4>=4.13
+streamlit
+langchain
 langchain-core
+langchain-community
+langchain-google-genai
 langchain-text-splitters
 langchain-chroma
 langchain-huggingface
+chromadb
 python-dotenv
 sentence-transformers
 torch

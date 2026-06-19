@@ -1,12 +1,12 @@
-"""Recherche hybride : index de mots-clés + recherche vectorielle.
+"""Recherche hybride : index par mots-clés et recherche vectorielle.
 
 Ce script combine :
 
 - la recherche par mots-clés de ``p2_keyword_retrieval.py``
 - la recherche vectorielle Chroma construite par ``data_process.py``
 
-La fusion utilise Reciprocal Rank Fusion (RRF), robuste lorsque les scores BM25
-et les distances vectorielles ne sont pas sur la même échelle.
+La fusion utilise Reciprocal Rank Fusion, car les scores de type BM25 et les
+distances vectorielles ne sont pas sur la même échelle.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ _SEARCH_CACHE: OrderedDict[tuple[Any, ...], tuple[float, dict[str, Any]]] = Orde
 
 
 def repair_mojibake(text: str) -> str:
-    """Repair common UTF-8-as-Latin-1 mojibake such as 'Ã©' -> 'é'."""
+    """Répare les erreurs courantes de décodage UTF-8 lu comme Latin-1."""
     if not isinstance(text, str) or "Ã" not in text:
         return text
     try:
@@ -88,7 +88,7 @@ def load_vectorstore(
 
 
 def clear_retrieval_caches() -> None:
-    """Clear in-memory embedding, vectorstore, and query-result caches."""
+    """Vide les caches en mémoire des embeddings, de Chroma et des requêtes."""
     _SEARCH_CACHE.clear()
     make_embeddings.cache_clear()
     load_vectorstore.cache_clear()
@@ -162,8 +162,12 @@ def hybrid_search(
     keyword_k: int = 20,
     vector_k: int = 20,
     rrf_k: int = 60,
-    keyword_weight: float = 1.0,
-    vector_weight: float = 1.0,
+    keyword_weight: float = 1.5,
+    vector_weight: float = 0.7,
+    rrf_weight: float = 0.4,
+    score_weight: float = 1.0,
+    coverage_weight: float = 0.2,
+    multi_retriever_bonus: float = 0.05,
     persist_directory: Path = DEFAULT_CHROMA_DIR,
     collection_name: str = DEFAULT_COLLECTION,
     model_name: str = DEFAULT_MODEL,
@@ -182,7 +186,27 @@ def hybrid_search(
     fused: dict[str, dict[str, Any]] = {}
     scores: defaultdict[str, float] = defaultdict(float)
 
-    def add_results(results: list[dict[str, Any]], source: str, weight: float) -> None:
+    query_terms = set(keyword_payload.get("analysis", {}).get("corrected_keywords") or [])
+
+    def normalized_scores(results: list[dict[str, Any]]) -> dict[str, float]:
+        scores = [float(result.get("score", 0.0)) for result in results]
+        if not scores:
+            return {}
+        low = min(scores)
+        high = max(scores)
+        out = {}
+        for result in results:
+            raw_score = float(result.get("score", 0.0))
+            if high > low:
+                out[result["id"]] = (raw_score - low) / (high - low)
+            else:
+                out[result["id"]] = 1.0 if raw_score > 0 else 0.0
+        return out
+
+    keyword_norms = normalized_scores(keyword_payload["results"])
+    vector_norms = normalized_scores(vector_payload["results"])
+
+    def add_results(results: list[dict[str, Any]], source: str, weight: float, norms: dict[str, float]) -> None:
         for rank, result in enumerate(results, start=1):
             result = {
                 **result,
@@ -205,21 +229,36 @@ def hybrid_search(
             fused[result_id]["sources"].append(source)
             fused[result_id][f"{source}_rank"] = rank
             fused[result_id][f"{source}_score"] = result.get("score", 0.0)
+            fused[result_id][f"{source}_norm_score"] = norms.get(result_id, 0.0)
 
-            # Les résultats mots-clés viennent du JSONL courant et gardent le
-            # texte le plus propre. Les résultats vectoriels complètent le rang
-            # et les entrées absentes, sans écraser ce texte.
+            # Les résultats mots-clés viennent du JSONL courant et ont souvent
+            # le texte le plus propre. Les résultats vectoriels complètent les
+            # entrées absentes sans écraser ce texte.
             if source == "vector" and "keyword" not in fused[result_id]["sources"]:
                 fused[result_id]["text"] = result["text"]
                 fused[result_id]["snippet"] = result["snippet"]
                 fused[result_id]["metadata"] = {**fused[result_id].get("metadata", {}), **result["metadata"]}
 
-    add_results(keyword_payload["results"], "keyword", keyword_weight)
-    add_results(vector_payload["results"], "vector", vector_weight)
+    add_results(keyword_payload["results"], "keyword", keyword_weight, keyword_norms)
+    add_results(vector_payload["results"], "vector", vector_weight, vector_norms)
 
     results = []
     for result_id, result in fused.items():
-        result["score"] = scores[result_id]
+        matched_terms = set(result.get("matched_terms") or [])
+        coverage = len(matched_terms & query_terms) / max(len(query_terms), 1) if query_terms else 0.0
+        retriever_count = len(set(result["sources"]))
+        result["rrf_score"] = scores[result_id]
+        result["term_coverage"] = coverage
+        result["score"] = (
+            rrf_weight * scores[result_id]
+            + score_weight
+            * (
+                keyword_weight * result.get("keyword_norm_score", 0.0)
+                + vector_weight * result.get("vector_norm_score", 0.0)
+            )
+            + coverage_weight * coverage
+            + (multi_retriever_bonus if retriever_count > 1 else 0.0)
+        )
         result["sources"] = sorted(set(result["sources"]))
         results.append(result)
 
@@ -394,7 +433,7 @@ def run_search(
             vector_k=vector_k,
         )
     else:
-        raise ValueError(f"Mode inconnu : {mode}")
+        raise ValueError(f"Unknown mode: {mode}")
 
     if use_cache:
         _store_cached_search(
@@ -582,12 +621,12 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="Recherche hybride par mots-clés et embeddings.")
+    parser = argparse.ArgumentParser(description="Hybrid retrieval with keyword and embedding search.")
     parser.add_argument("--query", type=str, default="")
     parser.add_argument("--mode", choices=("keyword", "vector", "hybrid"), default="hybrid")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--eval", type=Path, default=None)
-    parser.add_argument("--compare", action="store_true", help="Évaluer les modes mots-clés, vectoriel et hybride")
+    parser.add_argument("--compare", action="store_true", help="Evaluate keyword, vector, and hybrid modes")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--hf-cache-dir", type=Path, default=DEFAULT_HF_CACHE_DIR)
     parser.add_argument("--chroma-dir", type=Path, default=DEFAULT_CHROMA_DIR)
@@ -606,7 +645,7 @@ def main() -> None:
             cache_dir=args.hf_cache_dir,
             reset=args.reset_vectorstore,
         )
-        print(f"Base vectorielle prête : {args.chroma_dir} / {args.collection}")
+        print(f"Vector store ready: {args.chroma_dir} / {args.collection}")
 
     if args.eval:
         if args.compare:
@@ -653,7 +692,7 @@ def main() -> None:
         _print_search(payload)
         return
 
-    print('Passez --query "..." ou --eval data/keyword_eval_queries.jsonl')
+    print('Pass --query "..." or --eval data/keyword_eval_queries.jsonl')
 
 
 if __name__ == "__main__":
